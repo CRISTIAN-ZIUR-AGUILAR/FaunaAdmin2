@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "190654239142",
+    "project_id": "fauna2admin",
+    "storage_bucket": "fauna2admin.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:190654239142:android:c99ec8cf9f8d1bc144bf67",
+        "android_client_info": {
+          "package_name": "com.example.faunadmin2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBxvxeWyp9TQjKqpfpk8Nz-dxjhnhKFxO8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

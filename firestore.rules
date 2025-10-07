@@ -1,0 +1,110 @@
+// firestore.rules (adaptado a tu modelo actual)
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------- Helpers ----------
+    function isLoggedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
+    }
+    function isSupervisor() {
+      return request.auth != null &&
+             (request.auth.token.supervisor == true || isAdmin());
+    }
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+    function hasValidCoords() {
+      return (
+        !('lat' in request.resource.data) ||
+        (request.resource.data.lat is number && request.resource.data.lat >= -90 && request.resource.data.lat <= 90)
+      ) && (
+        !('lng' in request.resource.data) ||
+        (request.resource.data.lng is number && request.resource.data.lng >= -180 && request.resource.data.lng <= 180)
+      );
+    }
+
+    // ---------- ESPECIES (catálogo) ----------
+    match /especies/{id} {
+      allow read: if isLoggedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ---------- OBSERVACIONES ----------
+    // Modelo (resumen):
+    // uidUsuario (string, autor), estado ('borrador'|'pendiente'|'aprobado'|'rechazado'|'archivado'),
+    // fechaCaptura (timestamp), lat/lng/altitud (num, opc), especieNombre/especieId (opc),
+    // lugarNombre/lugarTipo/municipio/estadoPais (opc), notas (opc), media_urls (array<string>) (opc)
+    match /observaciones/{obsId} {
+
+      // Lectura: cualquiera autenticado (ajusta si necesitas privacidad por proyecto)
+      allow read: if isLoggedIn();
+
+      // Crear: autor debe coincidir, estado inicial 'borrador', fechaCaptura válida y coords válidas.
+      allow create: if isLoggedIn()
+        && request.resource.data.uidUsuario == request.auth.uid
+        && request.resource.data.estado == 'borrador'
+        && request.resource.data.fechaCaptura is timestamp
+        && hasValidCoords();
+
+      // Actualizar:
+      //  A) Autor puede editar mientras esté en 'borrador' y opcionalmente mover a 'pendiente'.
+      //  B) Supervisor/Admin pueden cambiar a cualquier estado permitido y editar campos de revisión.
+      allow update: if isLoggedIn() && (
+        (
+          // A) Autor edita su propio documento en 'borrador'
+          isOwner(resource.data.uidUsuario) &&
+          resource.data.estado == 'borrador' &&
+          request.resource.data.uidUsuario == resource.data.uidUsuario &&
+          hasValidCoords() &&
+          // Autor NO puede establecer 'aprobado' ni 'rechazado' ni 'archivado' directamente.
+          (
+            // permanece en 'borrador' o pasa a 'pendiente'
+            (request.resource.data.estado == 'borrador') ||
+            (request.resource.data.estado == 'pendiente')
+          )
+        ) || (
+          // B) Revisión por supervisor/admin
+          isSupervisor() &&
+          request.resource.data.uidUsuario == resource.data.uidUsuario &&
+          request.resource.data.estado in ['borrador','pendiente','aprobado','rechazado','archivado'] &&
+          hasValidCoords()
+        )
+      );
+
+      // Eliminar: solo admin
+      allow delete: if isAdmin();
+    }
+
+    // ---------- FOTOS ----------
+    // Documento creado por FotoService con idFoto, archivoUrl, fotografoUid, etc.
+    // Lectura: cualquiera autenticado
+    // Escritura: el dueño (fotografoUid) o supervisor/admin
+    match /fotos/{fotoId} {
+      allow read: if isLoggedIn();
+      allow create: if isLoggedIn()
+        && request.resource.data.fotografoUid == request.auth.uid;
+      allow update, delete: if isLoggedIn() && (
+        isSupervisor() ||
+        (resource.data.fotografoUid == request.auth.uid)
+      );
+    }
+
+    // ---------- CONTADORES ----------
+    // FotoService usa /contadores/{uid_año}. Para simplificar: lectura/escritura para autenticados.
+    // (Si luego quieres endurecer, guarda un campo 'uid' y compara contra request.auth.uid).
+    match /contadores/{docId} {
+      allow read, write: if isLoggedIn();
+    }
+
+    // ---------- CONTEXTOS ----------
+    // Ruta usada en FotoService: /contextos/{uid}/{anio}/items/entries/{tipo_nombre}
+    // El propietario (uid del path) puede leer/escribir; admins/supervisores también.
+    match /contextos/{uid}/{anio}/{subCol=**}/{doc} {
+      allow read, write: if isLoggedIn() && (isSupervisor() || request.auth.uid == uid);
+    }
+  }
+}

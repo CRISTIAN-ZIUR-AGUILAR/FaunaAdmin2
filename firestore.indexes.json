@@ -1,0 +1,104 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "usuario_rol_proyecto",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "id_rol", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "usuario_rol_proyecto",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "uid_usuario", "order": "ASCENDING" },
+        { "fieldPath": "id_rol", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "usuario_rol_proyecto",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid_usuario", "order": "ASCENDING" },
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "id_rol", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "usuario_rol_proyecto",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid_usuario", "order": "ASCENDING" },
+        { "fieldPath": "id_rol", "order": "ASCENDING" },
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "activo", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "usuario_rol_proyecto",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "activo", "order": "ASCENDING" },
+        { "fieldPath": "id_rol", "order": "ASCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "proyectos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid_dueno", "order": "ASCENDING" },
+        { "fieldPath": "nombre", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "usuarios",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estatus", "order": "ASCENDING" },
+        { "fieldPath": "fecha_registro", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "observaciones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "fecha_captura", "order": "DESCENDING" },
+        { "fieldPath": "ultima_modificacion", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "observaciones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "estado_validacion", "order": "ASCENDING" },
+        { "fieldPath": "fecha_captura", "order": "DESCENDING" },
+        { "fieldPath": "ultima_modificacion", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "observaciones",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "id_proyecto", "order": "ASCENDING" },
+        { "fieldPath": "uid_usuario", "order": "ASCENDING" },
+        { "fieldPath": "fecha_captura", "order": "DESCENDING" }
+      ]
+    },
+
+    {
+      "collectionGroup": "proyectos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "uid_supervisor", "order": "ASCENDING" },
+        { "fieldPath": "nombre", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
