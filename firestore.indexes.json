@@ -1,6 +1,15 @@
 {
   "indexes": [
     {
+      "collectionGroup": "municipios",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "buscable_estado", "order": "ASCENDING" },
+        { "fieldPath": "buscable", "order": "ASCENDING" }
+      ]
+    },
+
+    {
       "collectionGroup": "usuario_rol_proyecto",
       "queryScope": "COLLECTION",
       "fields": [

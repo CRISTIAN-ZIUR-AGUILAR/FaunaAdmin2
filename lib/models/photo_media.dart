@@ -4,14 +4,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 class MediaType {
   static const photo = 'photo';
   static const video = 'video';
-// Futuro: audio, documento, etc.
 }
 
 /// Origen del medio (para políticas de confianza)
 class MediaSource {
-  static const camera = 'camera';     // tomado con la cámara del dispositivo
-  static const gallery = 'gallery';   // seleccionado desde la galería
-  static const external = 'external'; // importado (link/descarga)
+  static const camera = 'camera';
+  static const gallery = 'gallery';
+  static const external = 'external';
 }
 
 /// Veredictos del análisis de autenticidad/calidad a nivel foto
@@ -44,11 +43,14 @@ class PhotoMedia {
   final String? id;               // id del doc en la subcolección
   final String observacionId;     // FK (por conveniencia en cliente)
 
+  // Identificador humano legible (ej: 00125_RMGU_PI / 00125_RMGU_PI1)
+  final String? photoId;
+
   // Básicos
   final String type;              // MediaType.photo|video
   final String source;            // MediaSource.*
   final String storagePath;       // fullPath en Storage (ej: fotos/2025/XX/ID.jpg)
-  final String? url;              // URL https de descarga para Image.network 👈
+  final String? url;              // URL https de descarga para Image.network
   final String? thumbnailPath;    // miniatura (opcional)
   final int? width;               // px
   final int? height;              // px
@@ -75,6 +77,9 @@ class PhotoMedia {
   final bool? edited;             // si la imagen fue editada
   final List<String>? editHistory;// ["crop","filter","enhance",...]
 
+  // Enriquecimiento
+  final String? address;          // dirección aproximada (reverse geocoding)
+
   // Metadatos IPTC/XMP crudos (opcional)
   final Map<String, dynamic>? iptc;
   final Map<String, dynamic>? xmp;
@@ -92,10 +97,11 @@ class PhotoMedia {
   PhotoMedia({
     this.id,
     required this.observacionId,
+    this.photoId,
     required this.type,
     required this.source,
     required this.storagePath,
-    this.url,                     // 👈 NUEVO
+    this.url,
     this.thumbnailPath,
     this.width,
     this.height,
@@ -117,6 +123,7 @@ class PhotoMedia {
     this.sha256,
     this.edited,
     this.editHistory,
+    this.address,
     this.iptc,
     this.xmp,
     this.authenticity,
@@ -139,10 +146,11 @@ class PhotoMedia {
 
   Map<String, dynamic> toMap() => {
     'observacion_id': observacionId,
+    if (photoId != null) 'photo_id': photoId,
     'type': type,
     'source': source,
     'storage_path': storagePath,
-    if (url != null) 'url': url,                    // 👈 NUEVO
+    if (url != null) 'url': url,
     if (thumbnailPath != null) 'thumbnail_path': thumbnailPath,
     if (width != null) 'width': width,
     if (height != null) 'height': height,
@@ -169,6 +177,9 @@ class PhotoMedia {
     if (edited != null) 'edited': edited,
     if (editHistory != null) 'edit_history': editHistory,
 
+    // Enriquecimiento
+    if (address != null) 'address': address,
+
     // IPTC/XMP
     if (iptc != null) 'iptc': iptc,
     if (xmp != null) 'xmp': xmp,
@@ -187,10 +198,11 @@ class PhotoMedia {
   factory PhotoMedia.fromMap(Map<String, dynamic> m, String id) => PhotoMedia(
     id: id,
     observacionId: (m['observacion_id'] ?? '') as String,
+    photoId: m['photo_id'] as String?,
     type: (m['type'] ?? MediaType.photo) as String,
     source: (m['source'] ?? MediaSource.gallery) as String,
     storagePath: (m['storage_path'] ?? '') as String,
-    url: m['url'] as String?,                         // 👈 NUEVO
+    url: m['url'] as String?,
     thumbnailPath: m['thumbnail_path'] as String?,
     width: _i(m['width']),
     height: _i(m['height']),
@@ -217,6 +229,9 @@ class PhotoMedia {
     edited: m['edited'] as bool?,
     editHistory: _strList(m['edit_history']),
 
+    // Enriquecimiento
+    address: m['address'] as String?,
+
     // IPTC/XMP
     iptc: _map(m['iptc']),
     xmp: _map(m['xmp']),
@@ -227,8 +242,8 @@ class PhotoMedia {
     confidence: _d(m['confidence']),
     flags: _strList(m['flags']),
 
-    // Auditoría
-    createdAt: _dt(m['createdAt']),
+    // Auditoría (acepta createdAt o created_at)
+    createdAt: _dt(m['createdAt']) ?? _dt(m['created_at']),
     createdBy: m['createdBy'] as String?,
   );
 
@@ -239,10 +254,11 @@ class PhotoMedia {
   PhotoMedia copyWith({
     String? id,
     String? observacionId,
+    String? photoId,
     String? type,
     String? source,
     String? storagePath,
-    String? url, // 👈 NUEVO
+    String? url,
     String? thumbnailPath,
     int? width,
     int? height,
@@ -264,6 +280,7 @@ class PhotoMedia {
     String? sha256,
     bool? edited,
     List<String>? editHistory,
+    String? address,
     Map<String, dynamic>? iptc,
     Map<String, dynamic>? xmp,
     String? authenticity,
@@ -276,10 +293,11 @@ class PhotoMedia {
     return PhotoMedia(
       id: id ?? this.id,
       observacionId: observacionId ?? this.observacionId,
+      photoId: photoId ?? this.photoId,
       type: type ?? this.type,
       source: source ?? this.source,
       storagePath: storagePath ?? this.storagePath,
-      url: url ?? this.url,                       // 👈 NUEVO
+      url: url ?? this.url,
       thumbnailPath: thumbnailPath ?? this.thumbnailPath,
       width: width ?? this.width,
       height: height ?? this.height,
@@ -301,6 +319,7 @@ class PhotoMedia {
       sha256: sha256 ?? this.sha256,
       edited: edited ?? this.edited,
       editHistory: editHistory ?? this.editHistory,
+      address: address ?? this.address,
       iptc: iptc ?? this.iptc,
       xmp: xmp ?? this.xmp,
       authenticity: authenticity ?? this.authenticity,
@@ -310,5 +329,25 @@ class PhotoMedia {
       createdAt: createdAt ?? this.createdAt,
       createdBy: createdBy ?? this.createdBy,
     );
+  }
+
+  /// Helper para construir el ID humano de la foto.
+  /// prog = consecutivo (>=1), date = fecha (se usa YY), initials = ej. "RMGU", project = "PI","RS","TF","EC","AC","OT"
+  /// ej: buildPhotoId(1, 2025-03-10, "RMGU", "PI") => "00125_RMGU_PI"
+  /// ej: buildPhotoId(1, 2025-03-10, "RMGU", "PI", extraIndex: 1) => "00125_RMGU_PI1"
+  static String buildPhotoId({
+    required int progressive,
+    required DateTime date,
+    required String initials,
+    required String project,
+    int? extraIndex,
+  }) {
+    final yy = (date.year % 100).toString().padLeft(2, '0');
+    final prog = progressive.toString().padLeft(3, '0');
+    final base = '${prog}${yy}_${initials.toUpperCase()}_${project.toUpperCase()}';
+    if (extraIndex != null && extraIndex > 0) {
+      return '$base${extraIndex}';
+    }
+    return base;
   }
 }

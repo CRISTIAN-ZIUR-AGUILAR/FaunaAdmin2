@@ -20,7 +20,6 @@ import 'package:faunadmin2/ui/screens/auth/login_screen.dart';
 import 'package:faunadmin2/ui/screens/auth/pending_screen.dart';
 import 'package:faunadmin2/ui/screens/auth/verify_email_screen.dart';
 import 'package:faunadmin2/ui/screens/admin/dashboard_admin_screen.dart';
-import 'package:faunadmin2/ui/screens/seleccion_rol_proyecto_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();

@@ -16,10 +16,12 @@ class SeleccionRolProyectoScreen extends StatefulWidget {
   const SeleccionRolProyectoScreen({Key? key}) : super(key: key);
 
   @override
-  State<SeleccionRolProyectoScreen> createState() => _SeleccionRolProyectoScreenState();
+  State<SeleccionRolProyectoScreen> createState() =>
+      _SeleccionRolProyectoScreenState();
 }
 
-class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen> {
+class _SeleccionRolProyectoScreenState
+    extends State<SeleccionRolProyectoScreen> {
   final _fs = FirestoreService();
 
   // Ruta del dashboard de usuario (ajústala si usas otra)
@@ -193,8 +195,187 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
         activo: true,
         estatus: 'aprobado',
       ));
-      Navigator.of(context).pushNamed('/proyectos/detalle_dueno', arguments: res);
+      Navigator.of(context)
+          .pushNamed('/proyectos/detalle_dueno', arguments: res);
     }
+  }
+
+  // ============================ Acciones ============================
+
+  // Dueño: elegir proyecto (si hay varios) y entrar a la vista del dueño
+  Future<void> _onTapOwner(
+      AuthProvider auth, List<Proyecto> ownerProjects) async {
+    if (ownerProjects.length == 1) {
+      final p = ownerProjects.first;
+      _selectOwnerAndEnter(auth, p);
+      return;
+    }
+    // Varios: picker
+    await _showProjectPicker(
+      title: 'Tus proyectos (Dueño)',
+      projects: ownerProjects,
+      onChoose: (p) => _selectOwnerAndEnter(auth, p),
+    );
+  }
+
+  void _selectOwnerAndEnter(AuthProvider auth, Proyecto p) {
+    final urp = UsuarioRolProyecto(
+      id: 'local-owner-${p.id}',
+      idRol: Rol.duenoProyecto,
+      uidUsuario: auth.usuario!.uid,
+      idProyecto: p.id,
+      activo: true,
+      estatus: 'aprobado',
+    );
+    auth.selectRolProyecto(urp);
+    Navigator.of(context)
+        .pushNamed('/proyectos/detalle_dueno', arguments: p.id);
+  }
+
+  // Supervisor/Colaborador/Recolector: usar URPs existentes por proyecto
+  Future<void> _onTapUrpRole(
+      AuthProvider auth,
+      int roleId,
+      List<UsuarioRolProyecto> urps,
+      ) async {
+    if (urps.length == 1) {
+      final u = urps.first;
+      auth.selectRolProyecto(u);
+      Navigator.of(context)
+          .pushNamed(_routeForRole(roleId), arguments: u.idProyecto);
+      return;
+    }
+
+    // Varios: cargar proyectos para mostrar nombres
+    final ids = urps.map((u) => u.idProyecto!).toSet().toList();
+    final proyectos = await _fs.getProyectosPorIds(ids);
+
+    await _showProjectPicker(
+      title: '${_rolName(roleId)} · Proyectos',
+      projects: proyectos,
+      onChoose: (p) {
+        final chosen = urps.firstWhere((u) => u.idProyecto == p.id);
+        auth.selectRolProyecto(chosen);
+        Navigator.of(context)
+            .pushNamed(_routeForRole(roleId), arguments: p.id);
+      },
+    );
+  }
+
+  String _routeForRole(int roleId) {
+    if (roleId == Rol.duenoProyecto) return '/proyectos/detalle_dueno';
+    return '/proyectos/detalle';
+  }
+
+  // Recolector GLOBAL: sin proyecto, entra directo a Observaciones
+  Future<void> _onTapRecolectorGlobal(AuthProvider auth) async {
+    UsuarioRolProyecto? urpGlobal;
+
+    try {
+      urpGlobal = _cacheUrps.firstWhere(
+            (u) =>
+        u.idRol == Rol.recolector &&
+            ((u.idProyecto == null) || (u.idProyecto?.isEmpty ?? true)) &&
+            (u.activo != false),
+      );
+    } catch (_) {
+      // Fallback defensivo: URP virtual si no lo encuentra en cache
+      final user = auth.usuario;
+      if (user != null) {
+        urpGlobal = UsuarioRolProyecto(
+          id: 'local-recolector-global',
+          idRol: Rol.recolector,
+          uidUsuario: user.uid,
+          idProyecto: null,
+          activo: true,
+          estatus: 'aprobado',
+        );
+      }
+    }
+
+    if (urpGlobal != null) {
+      auth.selectRolProyecto(urpGlobal);
+    }
+
+    if (!mounted) return;
+    Navigator.of(context).pushNamed('/observaciones/list');
+  }
+
+  Future<void> _showProjectPicker({
+    required String title,
+    required List<Proyecto> projects,
+    required void Function(Proyecto) onChoose,
+  }) async {
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(height: 8),
+              Container(
+                width: 36,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.black26,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  children: const [
+                    Icon(Icons.folder_open_rounded),
+                    SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Selecciona un proyecto',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 4),
+              Flexible(
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: projects.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final p = projects[i];
+                    final nombre = p.nombre.trim().isNotEmpty
+                        ? p.nombre.trim()
+                        : 'Proyecto ${p.id}';
+                    final cat = (p.categoriaNombre ?? '').trim();
+                    return ListTile(
+                      leading: const Icon(Icons.folder_rounded),
+                      title: Text(
+                        nombre,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      subtitle: cat.isNotEmpty ? Text(cat) : null,
+                      onTap: () {
+                        Navigator.of(context).pop();
+                        onChoose(p);
+                      },
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
   }
 
   // --------- UI ---------
@@ -202,16 +383,21 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
     if (auth.usuario == null) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
     }
 
-    // Si es admin por URP legacy, lo redirige al dashboard admin
+    // Si es admin, lo redirige al dashboard admin
     if (auth.isAdmin) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        Navigator.of(context).pushReplacementNamed('/admin/dashboard');
+        Navigator.of(context)
+            .pushReplacementNamed('/admin/dashboard');
       });
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
     }
 
     return Scaffold(
@@ -240,12 +426,13 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
 
           tiles.add(_sectionHeader(context, 'Elige cómo quieres entrar'));
 
-          // NUEVO: acceso directo al panel principal (dashboard de usuario)
+          // Acceso directo al panel principal (dashboard de usuario)
           tiles.add(_tileEntradaDashboard(context));
 
           // ===== Dueño =====
           if (data.ownerProjects.isNotEmpty) {
-            final ownerCounter = 'Tus proyectos: ${data.ownerProjects.length}';
+            final ownerCounter =
+                'Tus proyectos: ${data.ownerProjects.length}';
             tiles.add(
               _tileRol(
                 context: context,
@@ -287,7 +474,10 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
                       activo: true,
                       estatus: 'aprobado',
                     ));
-                    Navigator.of(context).pushNamed('/proyectos/detalle_dueno', arguments: projId);
+                    Navigator.of(context).pushNamed(
+                      '/proyectos/detalle_dueno',
+                      arguments: projId,
+                    );
                   }
                 },
               ),
@@ -303,10 +493,12 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
                 idRol: Rol.supervisor,
                 titulo: _rolName(Rol.supervisor),
                 subtitulo: 'Revisa proyectos asignados',
-                contadorLabel: 'Asignados: ${data.supervisorUrps.length}',
+                contadorLabel:
+                'Asignados: ${data.supervisorUrps.length}',
                 icon: _rolIcon(Rol.supervisor),
                 color: _rolColor(context, Rol.supervisor),
-                onTap: () => _onTapUrpRole(auth, Rol.supervisor, data.supervisorUrps),
+                onTap: () =>
+                    _onTapUrpRole(auth, Rol.supervisor, data.supervisorUrps),
               ),
             );
           }
@@ -320,10 +512,12 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
                 idRol: Rol.colaborador,
                 titulo: _rolName(Rol.colaborador),
                 subtitulo: 'Trabaja en tus proyectos asignados',
-                contadorLabel: 'Asignados: ${data.colaboradorUrps.length}',
+                contadorLabel:
+                'Asignados: ${data.colaboradorUrps.length}',
                 icon: _rolIcon(Rol.colaborador),
                 color: _rolColor(context, Rol.colaborador),
-                onTap: () => _onTapUrpRole(auth, Rol.colaborador, data.colaboradorUrps),
+                onTap: () =>
+                    _onTapUrpRole(auth, Rol.colaborador, data.colaboradorUrps),
               ),
             );
           }
@@ -340,11 +534,12 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
                 contadorLabel: 'Asignados: ${data.recoUrps.length}',
                 icon: _rolIcon(Rol.recolector),
                 color: _rolColor(context, Rol.recolector),
-                onTap: () => _onTapUrpRole(auth, Rol.recolector, data.recoUrps),
+                onTap: () =>
+                    _onTapUrpRole(auth, Rol.recolector, data.recoUrps),
               ),
             );
           } else if (data.hasRecoGlobal) {
-            // Recolector global → Observaciones
+            // Recolector global → Observaciones (sin proyecto)
             tiles.add(
               _tileRol(
                 context: context,
@@ -355,9 +550,7 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
                 contadorLabel: 'Sin proyecto',
                 icon: _rolIcon(Rol.recolector),
                 color: _rolColor(context, Rol.recolector),
-                onTap: () {
-                  Navigator.of(context).pushNamed('/observaciones/list');
-                },
+                onTap: () => _onTapRecolectorGlobal(auth),
               ),
             );
           }
@@ -378,7 +571,8 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
       floatingActionButton: StreamBuilder<_Payload>(
         stream: _payloadCtrl.stream,
         builder: (context, snapFab) {
-          final canCreate = snapFab.hasData && (snapFab.data!.hasOwnerGlobal == true);
+          final canCreate =
+              snapFab.hasData && (snapFab.data!.hasOwnerGlobal == true);
           if (!canCreate) return const SizedBox.shrink();
           final auth = context.read<AuthProvider>();
           return FloatingActionButton.extended(
@@ -417,29 +611,39 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16),
         decoration: _boxDecoration(context, color, false),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding:
+        const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         child: Row(
           children: [
             CircleAvatar(
               radius: 24,
               backgroundColor: color.withOpacity(.12),
-              child: Icon(Icons.dashboard_customize_rounded, color: color, size: 26),
+              child: Icon(
+                Icons.dashboard_customize_rounded,
+                color: color,
+                size: 26,
+              ),
             ),
             const SizedBox(width: 12),
             const Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Panel principal',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  Text(
+                    'Panel principal',
+                    style: TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
                   SizedBox(height: 4),
                   Text('Ir al dashboard de usuario'),
                 ],
               ),
             ),
             const SizedBox(width: 8),
-            Icon(Icons.chevron_right_rounded,
-                color: Theme.of(context).colorScheme.outline),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: Theme.of(context).colorScheme.outline,
+            ),
           ],
         ),
       ),
@@ -466,7 +670,8 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
       child: Container(
         margin: const EdgeInsets.symmetric(horizontal: 16),
         decoration: _boxDecoration(context, color, isSelected),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding:
+        const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         child: Row(
           children: [
             CircleAvatar(
@@ -479,13 +684,20 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(titulo, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                  Text(
+                    titulo,
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
                   if (subtitulo != null) ...[
                     const SizedBox(height: 4),
                     Text(
                       subtitulo,
                       style: TextStyle(
-                        color: Theme.of(context).colorScheme.onSurface.withOpacity(.7),
+                        color: Theme.of(context)
+                            .colorScheme
+                            .onSurface
+                            .withOpacity(.7),
                       ),
                     ),
                   ],
@@ -499,8 +711,11 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
                         label: Text(_rolName(idRol)),
                         visualDensity: VisualDensity.compact,
                         backgroundColor: color.withOpacity(.1),
-                        shape: StadiumBorder(side: BorderSide(color: color.withOpacity(.25))),
-                        labelStyle: TextStyle(color: color, fontWeight: FontWeight.w600),
+                        shape: StadiumBorder(
+                          side: BorderSide(color: color.withOpacity(.25)),
+                        ),
+                        labelStyle: TextStyle(
+                            color: color, fontWeight: FontWeight.w600),
                       ),
                       if (contadorLabel != null)
                         const SizedBox.shrink(),
@@ -521,14 +736,18 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
               ),
             ),
             const SizedBox(width: 8),
-            Icon(Icons.chevron_right_rounded, color: Theme.of(context).colorScheme.outline),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: Theme.of(context).colorScheme.outline,
+            ),
           ],
         ),
       ),
     );
   }
 
-  BoxDecoration _boxDecoration(BuildContext context, Color color, bool isSelected) {
+  BoxDecoration _boxDecoration(
+      BuildContext context, Color color, bool isSelected) {
     return BoxDecoration(
       borderRadius: BorderRadius.circular(14),
       color: Theme.of(context).colorScheme.surface,
@@ -546,141 +765,6 @@ class _SeleccionRolProyectoScreenState extends State<SeleccionRolProyectoScreen>
             : Theme.of(context).colorScheme.outline.withOpacity(.18),
         width: isSelected ? 1.5 : 1,
       ),
-    );
-  }
-
-  // ============================ Acciones ============================
-
-  // Dueño: elegir proyecto (si hay varios) y entrar a la vista del dueño
-  Future<void> _onTapOwner(AuthProvider auth, List<Proyecto> ownerProjects) async {
-    if (ownerProjects.length == 1) {
-      final p = ownerProjects.first;
-      _selectOwnerAndEnter(auth, p);
-      return;
-    }
-    // Varios: picker
-    await _showProjectPicker(
-      title: 'Tus proyectos (Dueño)',
-      projects: ownerProjects,
-      onChoose: (p) => _selectOwnerAndEnter(auth, p),
-    );
-  }
-
-  void _selectOwnerAndEnter(AuthProvider auth, Proyecto p) {
-    final urp = UsuarioRolProyecto(
-      id: 'local-owner-${p.id}',
-      idRol: Rol.duenoProyecto,
-      uidUsuario: auth.usuario!.uid,
-      idProyecto: p.id,
-      activo: true,
-      estatus: 'aprobado',
-    );
-    auth.selectRolProyecto(urp);
-    Navigator.of(context).pushNamed('/proyectos/detalle_dueno', arguments: p.id);
-  }
-
-  // Supervisor/Colaborador/Recolector: usar URPs existentes
-  Future<void> _onTapUrpRole(
-      AuthProvider auth,
-      int roleId,
-      List<UsuarioRolProyecto> urps,
-      ) async {
-    if (urps.length == 1) {
-      final u = urps.first;
-      auth.selectRolProyecto(u);
-      Navigator.of(context).pushNamed(_routeForRole(roleId), arguments: u.idProyecto);
-      return;
-    }
-
-    // Varios: cargar proyectos para mostrar nombres
-    final ids = urps.map((u) => u.idProyecto!).toSet().toList();
-    final proyectos = await _fs.getProyectosPorIds(ids);
-
-    await _showProjectPicker(
-      title: '${_rolName(roleId)} · Proyectos',
-      projects: proyectos,
-      onChoose: (p) {
-        final chosen = urps.firstWhere((u) => u.idProyecto == p.id);
-        auth.selectRolProyecto(chosen);
-        Navigator.of(context).pushNamed(_routeForRole(roleId), arguments: p.id);
-      },
-    );
-  }
-
-  String _routeForRole(int roleId) {
-    if (roleId == Rol.duenoProyecto) return '/proyectos/detalle_dueno';
-    return '/proyectos/detalle';
-  }
-
-  Future<void> _showProjectPicker({
-    required String title,
-    required List<Proyecto> projects,
-    required void Function(Proyecto) onChoose,
-  }) async {
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const SizedBox(height: 8),
-              Container(
-                width: 36,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Row(
-                  children: [
-                    const Icon(Icons.folder_open_rounded),
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'Selecciona un proyecto',
-                        style: TextStyle(fontWeight: FontWeight.w700),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 4),
-              Flexible(
-                child: ListView.separated(
-                  shrinkWrap: true,
-                  itemCount: projects.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (_, i) {
-                    final p = projects[i];
-                    final nombre =
-                    p.nombre.trim().isNotEmpty ? p.nombre.trim() : 'Proyecto ${p.id}';
-                    final cat = (p.categoriaNombre ?? '').trim();
-                    return ListTile(
-                      leading: const Icon(Icons.folder_rounded),
-                      title: Text(nombre, maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: cat.isNotEmpty ? Text(cat) : null,
-                      onTap: () {
-                        Navigator.of(context).pop();
-                        onChoose(p);
-                      },
-                    );
-                  },
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-          ),
-        );
-      },
     );
   }
 }
@@ -710,11 +794,17 @@ class _StateMsg extends StatelessWidget {
   final String title;
   final String? subtitle;
   final Widget? action;
-  const _StateMsg({required this.icon, required this.title, this.subtitle, this.action});
+  const _StateMsg({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    this.action,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final onSurf = Theme.of(context).colorScheme.onSurface.withOpacity(.75);
+    final onSurf =
+    Theme.of(context).colorScheme.onSurface.withOpacity(.75);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
@@ -723,7 +813,11 @@ class _StateMsg extends StatelessWidget {
           children: [
             Icon(icon, size: 40, color: onSurf),
             const SizedBox(height: 8),
-            Text(title, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            Text(
+              title,
+              style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600),
+            ),
             if (subtitle != null) ...[
               const SizedBox(height: 6),
               Text(subtitle!, textAlign: TextAlign.center),
@@ -751,12 +845,14 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.info_outline_rounded, size: 48, color: cs.primary),
+            Icon(Icons.info_outline_rounded,
+                size: 48, color: cs.primary),
             const SizedBox(height: 12),
             const Text(
               'No tienes roles o proyectos asignados.',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 6),
             const Text(
@@ -770,5 +866,3 @@ class _EmptyState extends StatelessWidget {
     );
   }
 }
-
-

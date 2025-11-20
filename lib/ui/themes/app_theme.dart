@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-/// ================== PALETA (según la imagen) ==================
+/// ================== PALETA (igual a la tuya) ==================
 class Brand {
   // Marca / AppBar
   static const green      = Color(0xFF22C55E);
@@ -15,23 +15,33 @@ class Brand {
 
   // Superficies e inputs
   static const card       = Color(0xFFFFFFFF);
-  static const bgLight    = Color(0xFFF3F4F6);
-  static const inputLight = Color(0xFFE5E7EB);
+  static const bgLight    = Color(0xFFF6F7F9); // un pelín más suave
+  static const inputLight = Color(0xFFEFF1F4); // +contraste con texto
 
   static const bgDark     = Color(0xFF0B1113);
   static const surfaceDk  = Color(0xFF111417);
-  static const inputDark  = Color(0xFF1F2937);
+  static const inputDark  = Color(0xFF151B20); // +claro que bg, para legibilidad
 
   // Texto
   static const textMain   = Color(0xFF0F172A);
-  static const textMute   = Color(0xFF334155);
-  static const textOnDark = Color(0xFFE5E7EB);
+  static const textMute   = Color(0xFF4B5563); // un poco más visible
+  static const textOnDark = Color(0xFFE7EAEC);
+}
+
+/// Helpers de mezcla (para hover/press sutiles)
+Color _blend(Color a, Color b, double t) {
+  return Color.fromARGB(
+    (a.alpha + (b.alpha - a.alpha) * t).round(),
+    (a.red   + (b.red   - a.red)   * t).round(),
+    (a.green + (b.green - a.green) * t).round(),
+    (a.blue  + (b.blue  - a.blue)  * t).round(),
+  );
 }
 
 /// ================== TEXTOS ==================
 TextTheme _text(Brightness b) {
-  final on = b == Brightness.dark ? Brand.textOnDark : Brand.textMain;
-  final sub = b == Brightness.dark ? const Color(0xFFCBD5E1) : Brand.textMute;
+  final on  = b == Brightness.dark ? Brand.textOnDark : Brand.textMain;
+  final sub = b == Brightness.dark ? const Color(0xFFBCC6CF) : Brand.textMute;
 
   return TextTheme(
     headlineSmall: TextStyle(fontWeight: FontWeight.w800, color: on, letterSpacing: -.2),
@@ -44,49 +54,49 @@ TextTheme _text(Brightness b) {
 }
 
 /// ================== ESQUEMAS DE COLOR (M3) ==================
-ColorScheme _light = const ColorScheme(
+final ColorScheme _light = ColorScheme(
   brightness: Brightness.light,
   primary: Brand.green,     onPrimary: Colors.white,
-  primaryContainer: Color(0xFFD1FADF), onPrimaryContainer: Color(0xFF052E16),
+  primaryContainer: const Color(0xFFD8F7E6), onPrimaryContainer: const Color(0xFF052E16),
 
   secondary: Brand.blue,    onSecondary: Colors.white,
-  secondaryContainer: Color(0xFFDCEBFF), onSecondaryContainer: Color(0xFF0A2A4A),
+  secondaryContainer: const Color(0xFFE3F1FF), onSecondaryContainer: const Color(0xFF0A2A4A),
 
-  tertiary: Color(0xFF1F5130), onTertiary: Colors.white,
-  tertiaryContainer: Color(0xFFCFE9DA), onTertiaryContainer: Color(0xFF0E2A1C),
+  tertiary: const Color(0xFF1F5130), onTertiary: Colors.white,
+  tertiaryContainer: const Color(0xFFCFE9DA), onTertiaryContainer: const Color(0xFF0E2A1C),
 
   background: Brand.bgLight,  onBackground: Brand.textMain,
   surface: Brand.card,        onSurface: Brand.textMain,
-  surfaceVariant: Color(0xFFEFF1F3), onSurfaceVariant: Color(0xFF475569),
+  surfaceVariant: const Color(0xFFEEF1F4), onSurfaceVariant: const Color(0xFF556270),
 
-  error: Color(0xFFEF4444), onError: Colors.white,
-  errorContainer: Color(0xFFFFE1E1), onErrorContainer: Color(0xFF7F1D1D),
+  error: const Color(0xFFDC2626), onError: Colors.white,
+  errorContainer: const Color(0xFFFFE5E5), onErrorContainer: const Color(0xFF7F1D1D),
 
-  outline: Color(0xFFD1D5DB), outlineVariant: Color(0xFFE5E7EB),
-  inverseSurface: Color(0xFF0B1113), onInverseSurface: Colors.white,
+  outline: const Color(0xFFD6DADE), outlineVariant: const Color(0xFFE9ECF0),
+  inverseSurface: const Color(0xFF0B1113), onInverseSurface: Colors.white,
   inversePrimary: Brand.greenDark, shadow: Colors.black, scrim: Colors.black,
 );
 
-ColorScheme _dark = const ColorScheme(
+final ColorScheme _dark = ColorScheme(
   brightness: Brightness.dark,
   primary: Brand.greenDark, onPrimary: Colors.white,
-  primaryContainer: Color(0xFF09351F), onPrimaryContainer: Color(0xFFBAF7CF),
+  primaryContainer: const Color(0xFF0E3A22), onPrimaryContainer: const Color(0xFFBAF7CF),
 
   secondary: Brand.blueDark, onSecondary: Colors.white,
-  secondaryContainer: Color(0xFF10264D), onSecondaryContainer: Color(0xFFDBEAFE),
+  secondaryContainer: const Color(0xFF0E2A52), onSecondaryContainer: const Color(0xFFDBEAFE),
 
-  tertiary: Color(0xFF1C3D2A), onTertiary: Color(0xFFCFE9DA),
-  tertiaryContainer: Color(0xFF102518), onTertiaryContainer: Color(0xFFBFE0CF),
+  tertiary: const Color(0xFF1C3D2A), onTertiary: const Color(0xFFCFE9DA),
+  tertiaryContainer: const Color(0xFF102518), onTertiaryContainer: const Color(0xFFBFE0CF),
 
   background: Brand.bgDark,  onBackground: Brand.textOnDark,
   surface: Brand.surfaceDk,  onSurface: Brand.textOnDark,
-  surfaceVariant: Color(0xFF192025), onSurfaceVariant: Color(0xFF9AA4AE),
+  surfaceVariant: const Color(0xFF171D22), onSurfaceVariant: const Color(0xFFA8B2BC),
 
-  error: Color(0xFFF87171), onError: Color(0xFF450A0A),
-  errorContainer: Color(0xFF3F1515), onErrorContainer: Color(0xFFFFDAD6),
+  error: const Color(0xFFF87171), onError: const Color(0xFF450A0A),
+  errorContainer: const Color(0xFF3F1515), onErrorContainer: const Color(0xFFFFDAD6),
 
-  outline: Color(0xFF2A3238), outlineVariant: Brand.inputDark,
-  inverseSurface: Color(0xFFE7EAEC), onInverseSurface: Brand.bgDark,
+  outline: const Color(0xFF2B333A), outlineVariant: Brand.inputDark,
+  inverseSurface: const Color(0xFFE7EAEC), onInverseSurface: Brand.bgDark,
   inversePrimary: Brand.green, shadow: Colors.black, scrim: Colors.black,
 );
 
@@ -97,32 +107,48 @@ class AppTheme {
 
   static ThemeData _build(ColorScheme cs) {
     final isDark = cs.brightness == Brightness.dark;
+    final text = _text(cs.brightness);
     final radius = BorderRadius.circular(18);
 
     return ThemeData(
       useMaterial3: true,
       colorScheme: cs,
       scaffoldBackgroundColor: cs.background,
-      textTheme: _text(cs.brightness),
+      textTheme: text,
 
-      // AppBar VERDE (como en la imagen)
+      // AppBar VERDE (título siempre legible sobre el verde)
       appBarTheme: AppBarTheme(
         backgroundColor: cs.primary,
         foregroundColor: cs.onPrimary,
         elevation: 0,
         centerTitle: true,
-        titleTextStyle: _text(cs.brightness).titleLarge,
+        titleTextStyle: text.titleLarge?.copyWith(
+          color: cs.onPrimary,
+          fontWeight: FontWeight.w700,
+        ),
+        iconTheme: IconThemeData(color: cs.onPrimary),
       ),
 
-      // Tarjetas (login card blanca con sombra suave)
+      // Iconos visibles en dark/light
+      iconTheme: IconThemeData(color: isDark ? cs.onSurface : cs.onSurfaceVariant),
+
+      // Tarjetas (más suaves en light, más definidas en dark)
       cardTheme: CardTheme(
         color: cs.surface,
-        elevation: 0, // manejamos sombra con BoxDecoration en el widget si se desea
+        elevation: isDark ? 1.5 : 0,
         margin: const EdgeInsets.all(12),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        surfaceTintColor: isDark ? null : cs.surface, // evita tinte gris en light
       ),
 
-      // Inputs: gris relleno, borde redondeado, FOCUS MORADO
+      // Dividers más sutiles
+      dividerTheme: DividerThemeData(
+        color: cs.outline.withOpacity(isDark ? .25 : .6),
+        space: 1,
+        thickness: 1,
+      ),
+
+      // Inputs: relleno suave, texto con alto contraste
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: isDark ? Brand.inputDark : Brand.inputLight,
@@ -139,14 +165,29 @@ class AppTheme {
           borderRadius: BorderRadius.all(Radius.circular(18)),
           borderSide: BorderSide(color: Brand.violet, width: 1.6),
         ),
-        hintStyle: _text(cs.brightness).bodyMedium,
-        labelStyle: _text(cs.brightness).bodyMedium,
-        prefixIconColor: cs.onSurfaceVariant,
-        suffixIconColor: cs.onSurfaceVariant,
+        errorBorder: OutlineInputBorder(
+          borderRadius: radius,
+          borderSide: BorderSide(color: cs.error.withOpacity(.9)),
+        ),
+        focusedErrorBorder: OutlineInputBorder(
+          borderRadius: radius,
+          borderSide: BorderSide(color: cs.error, width: 1.6),
+        ),
+        hintStyle: text.bodyMedium?.copyWith(
+          color: cs.onSurfaceVariant.withOpacity(isDark ? .75 : .9),
+        ),
+        labelStyle: text.bodyMedium?.copyWith(
+          color: cs.onSurfaceVariant.withOpacity(isDark ? .9 : .8),
+          fontWeight: FontWeight.w500,
+        ),
+        helperStyle: text.bodyMedium,
+        prefixIconColor: cs.onSurfaceVariant.withOpacity(.9),
+        suffixIconColor: cs.onSurfaceVariant.withOpacity(.9),
       ),
 
-      // Dropdown idéntico a los inputs
+      // Dropdown igual a inputs
       dropdownMenuTheme: DropdownMenuThemeData(
+        textStyle: text.bodyLarge?.copyWith(color: cs.onSurface),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
           fillColor: isDark ? Brand.inputDark : Brand.inputLight,
@@ -166,54 +207,75 @@ class AppTheme {
         ),
       ),
 
-      // BOTÓN PRINCIPAL AZUL en forma "pill"
+      // BOTÓN PRINCIPAL (azul)
       filledButtonTheme: FilledButtonThemeData(
         style: ButtonStyle(
           minimumSize: const MaterialStatePropertyAll(Size.fromHeight(44)),
           shape: const MaterialStatePropertyAll(StadiumBorder()),
           backgroundColor: MaterialStateProperty.resolveWith((states) {
-            final disabled = states.contains(MaterialState.disabled);
-            return disabled ? cs.secondary.withOpacity(.5) : cs.secondary;
+            final base = cs.secondary;
+            if (states.contains(MaterialState.disabled)) {
+              return base.withOpacity(.45);
+            }
+            if (states.contains(MaterialState.pressed)) {
+              return _blend(base, Colors.black, .08);
+            }
+            if (states.contains(MaterialState.hovered)) {
+              return _blend(base, Colors.white, .06);
+            }
+            return base;
           }),
           foregroundColor: const MaterialStatePropertyAll(Colors.white),
-          textStyle: MaterialStatePropertyAll(_text(cs.brightness).labelLarge),
+          textStyle: MaterialStatePropertyAll(text.labelLarge),
           elevation: const MaterialStatePropertyAll(0),
         ),
       ),
 
-      // Botón verde (si lo usas para acciones secundarias)
+      // Botón secundario (verde)
       elevatedButtonTheme: ElevatedButtonThemeData(
         style: ButtonStyle(
           minimumSize: const MaterialStatePropertyAll(Size.fromHeight(44)),
           shape: MaterialStatePropertyAll(RoundedRectangleBorder(borderRadius: radius)),
-          backgroundColor: MaterialStatePropertyAll(cs.primary),
+          backgroundColor: MaterialStateProperty.resolveWith((states) {
+            final base = cs.primary;
+            if (states.contains(MaterialState.disabled)) return base.withOpacity(.45);
+            if (states.contains(MaterialState.pressed)) return _blend(base, Colors.black, .08);
+            if (states.contains(MaterialState.hovered)) return _blend(base, Colors.white, .06);
+            return base;
+          }),
           foregroundColor: const MaterialStatePropertyAll(Colors.white),
-          textStyle: MaterialStatePropertyAll(_text(cs.brightness).labelLarge),
+          textStyle: MaterialStatePropertyAll(text.labelLarge),
           elevation: const MaterialStatePropertyAll(0.5),
         ),
       ),
 
-      // Link azul (¿Olvidaste tu contraseña?)
+      // Link (texto botón)
       textButtonTheme: TextButtonThemeData(
         style: ButtonStyle(
           foregroundColor: MaterialStatePropertyAll(cs.secondary),
+          overlayColor: MaterialStatePropertyAll(cs.secondary.withOpacity(.08)),
           textStyle: MaterialStatePropertyAll(
-            _text(cs.brightness).labelLarge!.copyWith(fontWeight: FontWeight.w600),
+            text.labelLarge!.copyWith(fontWeight: FontWeight.w600),
           ),
         ),
       ),
 
-      dividerTheme: DividerThemeData(
-        color: cs.outlineVariant,
-        space: 1,
-        thickness: 1,
+      // Navigation bar (si la usas)
+      navigationBarTheme: NavigationBarThemeData(
+        indicatorColor: cs.secondaryContainer.withOpacity(isDark ? .28 : .42),
+        backgroundColor: cs.surface,
+        labelTextStyle: MaterialStatePropertyAll(text.labelLarge),
+        iconTheme: MaterialStatePropertyAll(
+          IconThemeData(color: cs.onSurface),
+        ),
       ),
 
-      // Navegación inferior por si la usas
-      navigationBarTheme: NavigationBarThemeData(
-        indicatorColor: cs.secondaryContainer.withOpacity(isDark ? .32 : .48),
-        backgroundColor: cs.surface,
-        labelTextStyle: MaterialStatePropertyAll(_text(cs.brightness).labelLarge),
+      // Snackbars legibles
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: isDark ? const Color(0xFF11181C) : const Color(0xFF0F172A),
+        contentTextStyle: text.bodyLarge?.copyWith(color: Colors.white),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
       ),
     );
   }

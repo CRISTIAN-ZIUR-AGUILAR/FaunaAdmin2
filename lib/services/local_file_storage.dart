@@ -1,7 +1,6 @@
 // lib/services/local_file_storage.dart
 import 'dart:convert';
 import 'dart:io';
-
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
@@ -15,12 +14,10 @@ class LocalFileStorage {
   // =========================
   // Paths base
   // =========================
-
   Future<Directory> _getRoot() async {
     if (kIsWeb) {
       throw UnsupportedError('Almacenamiento local no disponible en Web.');
     }
-
     // Preferimos Documents; si algo falla, caemos a External o, en última instancia, a Temp.
     Directory base;
     try {
@@ -28,19 +25,16 @@ class LocalFileStorage {
     } catch (_) {
       base = (await getExternalStorageDirectory()) ?? await getTemporaryDirectory();
     }
-
     final root = Directory('${base.path}/FaunaLocal');
     if (!await root.exists()) await root.create(recursive: true);
     return root;
   }
-
   Future<Directory> _getObsDir() async {
     final root = await _getRoot();
     final dir = Directory('${root.path}/observaciones');
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
-
   String _stamp() {
     final d = DateTime.now();
     String t(int n) => n.toString().padLeft(2, '0');
@@ -52,16 +46,13 @@ class LocalFileStorage {
     if (ext == 'jpg' || ext == 'jpeg' || ext == 'png') return ext;
     return 'jpg';
   }
-
   // =========================
   // Guardar observación completa (meta + 1..4 fotos)
   // =========================
-
   /// Guarda OBSERVACIÓN con múltiples fotos (1..4) y meta completo.
   /// - Crea: FaunaLocal/observaciones/<stamp_uuid8>/
   /// - Copia fotos: foto_1.<ext> .. foto_4.<ext>
   /// - Escribe meta.json y mete control local.
-  ///
   /// [idProyecto] y [uidUsuario] son opcionales; si se pasan, sobrescriben
   /// valores presentes en [meta] bajo las claves "id_proyecto" y "uid_usuario".
   Future<Directory> guardarObservacionFull({

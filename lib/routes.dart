@@ -34,19 +34,21 @@ import 'package:faunadmin2/ui/screens/proyectos/lista_proyectos_screen.dart';
 import 'package:faunadmin2/ui/screens/proyectos/agregar_proyecto_screen.dart';
 import 'package:faunadmin2/ui/screens/proyectos/editar_proyecto_screen.dart';
 import 'package:faunadmin2/ui/screens/proyectos/equipo_proyecto_screen.dart';
-import 'package:faunadmin2/ui/screens/proyectos/detalle_proyecto_screen.dart'
-as proj_detalle;
+import 'package:faunadmin2/ui/screens/proyectos/detalle_proyecto_screen.dart' as proj_detalle;
 import 'package:faunadmin2/ui/screens/proyectos/detalle_proyecto_dueno_screen.dart';
 
 // Observaciones
 import 'package:faunadmin2/ui/screens/observaciones/lista_observaciones_screen.dart';
 import 'package:faunadmin2/ui/screens/observaciones/agregar_observacion_screen.dart';
 import 'package:faunadmin2/ui/screens/observaciones/aprobar_observacion_screen.dart';
-import 'package:faunadmin2/ui/screens/observaciones/detalle_observacion.dart';
+import 'package:faunadmin2/ui/screens/observaciones/detalle_observacion_screen.dart';
+import 'package:faunadmin2/ui/screens/observaciones/detalle_observacion_local_screen.dart';
 
-// 👇 IMPORTES NUEVOS (edición nube + edición local)
+// 👇 IMPORTES NUEVOS (edición nube
 import 'package:faunadmin2/ui/screens/observaciones/editar_observacion_screen.dart';
-import 'package:faunadmin2/ui/screens/observaciones/editar_local_observacion_screen.dart';
+
+import 'models/observacion.dart';
+
 
 /// Flag: habilitar/deshabilitar módulo Observaciones.
 const bool kObservacionesHabilitadas = true;
@@ -142,7 +144,7 @@ class Routes {
               return ChangeNotifierProvider(
                 create: (ctx) => NotificacionProvider(
                   FirebaseFirestore.instance, // 👈 1er parámetro: Firestore
-                  ctx.read<AuthProvider>(), // 👈 2º parámetro: AuthProvider
+                  ctx.read<AuthProvider>(),    // 👈 2º parámetro: AuthProvider
                 ),
                 child: const DashboardScreen(
                   skipAutoNavFromRoute: true,
@@ -309,152 +311,116 @@ class Routes {
             }
 
         // ========= OBSERVACIONES =========
-          case '/observaciones/list':
-            {
-              if (!kObservacionesHabilitadas) {
-                return _redirect(context, '/dashboard');
-              }
-              if (!isLoggedIn) return _redirect(context, '/login');
-              if (!approved) return _redirect(context, '/pending');
-              if (!isAdminLike && !emailVerified) {
-                return _redirect(context, '/verifyEmail');
-              }
-              if (!permisos.canViewObservations) {
-                return _redirect(context, '/dashboard');
-              }
-              return const ListaObservacionesScreen();
+          case '/observaciones/list': {
+            if (!kObservacionesHabilitadas) return _redirect(context, '/dashboard');
+            if (!isLoggedIn) return _redirect(context, '/login');
+            if (!approved) return _redirect(context, '/pending');
+            if (!isAdminLike && !emailVerified) return _redirect(context, '/verifyEmail');
+            if (!permisos.canViewObservations) return _redirect(context, '/dashboard');
+            return const ListaObservacionesScreen();
+          }
+
+          case '/observaciones/detalle': {
+            if (!kObservacionesHabilitadas) return _redirect(context, '/dashboard');
+            if (!isLoggedIn) return _redirect(context, '/login');
+            if (!approved) return _redirect(context, '/pending');
+            if (!isAdminLike && !emailVerified) return _redirect(context, '/verifyEmail');
+            if (!permisos.canViewObservations) return _redirect(context, '/dashboard');
+
+            final args = settings.arguments;
+            final String? obsId =
+            (args is String && args.trim().isNotEmpty) ? args.trim() : null;
+
+            if (obsId == null) return _redirect(context, '/observaciones/list');
+            return DetalleObservacionScreen(observacionId: obsId);
+          }
+          case '/observaciones/detalle_local': {
+            final args = settings.arguments;
+            debugPrint('[route] detalle_local args=$args');
+
+            // Camino ideal
+            if (args is Map && args['obs'] != null) {
+              final obs = args['obs'] as Observacion;
+              final baseDir = args['dirPath'] as String?;
+              debugPrint('[route] forwarding baseDir=$baseDir, obs.id=${obs.id}');
+              return DetalleObservacionLocalScreen(observacion: obs, baseDir: baseDir);
             }
 
-          case '/observaciones/captura_rapida':
-            {
-              if (!kObservacionesHabilitadas) {
-                return _redirect(context, '/dashboard');
-              }
-              if (!isLoggedIn) return _redirect(context, '/login');
-              if (!approved) return _redirect(context, '/pending');
-              if (!isAdminLike && !emailVerified) {
-                return _redirect(context, '/verifyEmail');
-              }
-
-              final args = (settings.arguments as Map?) ?? const {};
-              final String? proyectoId = args['proyectoId'] as String?;
-              final String? uidUsuario = args['uidUsuario'] as String?;
-
-              if (proyectoId == null || proyectoId.trim().isEmpty) {
-                return _redirect(context, '/observaciones/list');
-              }
-              if (!permisos.canCreateObservationInProject(proyectoId)) {
-                return _redirect(context, '/observaciones/list');
-              }
-              if (uidUsuario == null ||
-                  (uidUsuario != auth.uid && !permisos.isAdminUnico)) {
-                return _redirect(context, '/observaciones/list');
-              }
-              return CapturaRapidaScreen(
-                  proyectoId: proyectoId, uidUsuario: uidUsuario);
+            // Compat: si alguien aún manda el modelo directo (SIN dirPath) -> avisa
+            if (args is Observacion) {
+              debugPrint('[route][WARN] Llegó Observacion sin dirPath; no habrá fotos locales.');
+              return DetalleObservacionLocalScreen(observacion: args, baseDir: null);
             }
 
-          case '/observaciones/add':
-            {
-              if (!kObservacionesHabilitadas) {
-                return _redirect(context, '/dashboard');
-              }
-              if (!isLoggedIn) return _redirect(context, '/login');
-              if (!approved) return _redirect(context, '/pending');
-              if (!isAdminLike && !emailVerified) {
-                return _redirect(context, '/verifyEmail');
-              }
+            return const DashboardScreen();
+          }
+          case '/observaciones/add': {
+            if (!kObservacionesHabilitadas) return _redirect(context, '/dashboard');
+            if (!isLoggedIn) return _redirect(context, '/login');
+            if (!approved) return _redirect(context, '/pending');
+            if (!isAdminLike && !emailVerified) return _redirect(context, '/verifyEmail');
 
-              final args = (settings.arguments as Map?) ?? const {};
-              final String? proyectoId = args['proyectoId'] as String?;
-              final String? uidUsuario = args['uidUsuario'] as String?;
+            final args = (settings.arguments as Map?) ?? const {};
+            final String? proyectoId = args['proyectoId'] as String?;
+            final String? uidUsuario = args['uidUsuario'] as String?;
 
-              if (uidUsuario == null ||
-                  uidUsuario.trim().isEmpty ||
-                  (uidUsuario != auth.uid && !permisos.isAdminUnico)) {
-                return _redirect(context, '/observaciones/list');
-              }
-
-              final bool puedeCrear = (proyectoId == null ||
-                  proyectoId.trim().isEmpty)
-                  ? permisos.canCreateObservationSinProyecto
-                  : permisos.canCreateObservationInProject(proyectoId);
-
-              if (!puedeCrear) return _redirect(context, '/observaciones/list');
-
-              return const AgregarObservacionScreen();
+            if (uidUsuario == null ||
+                uidUsuario.trim().isEmpty ||
+                (uidUsuario != auth.uid && !permisos.isAdminUnico)) {
+              return _redirect(context, '/observaciones/list');
             }
 
-          case '/observaciones/approve':
-            {
-              if (!kObservacionesHabilitadas) {
-                return _redirect(context, '/dashboard');
-              }
-              if (!isLoggedIn) return _redirect(context, '/login');
-              if (!approved) return _redirect(context, '/pending');
-              if (!isAdminLike && !emailVerified) {
-                return _redirect(context, '/verifyEmail');
-              }
+            final bool puedeCrear = (proyectoId == null || proyectoId.trim().isEmpty)
+                ? permisos.canCreateObservationSinProyecto
+                : permisos.canCreateObservationInProject(proyectoId);
 
-              final args = settings.arguments;
-              final String? obsId =
-              (args is String && args.trim().isNotEmpty)
-                  ? args.trim()
-                  : null;
-              if (obsId == null) {
-                return _redirect(context, '/observaciones/list');
-              }
+            if (!puedeCrear) return _redirect(context, '/observaciones/list');
 
-              return AprobarObservacionScreen(observacionId: obsId);
-            }
+            return const AgregarObservacionScreen();
+          }
 
-        // ======= NUEVOS: EDITAR (NUBE) y EDITAR LOCAL =======
-          case '/observaciones/edit':
-            {
-              if (!kObservacionesHabilitadas) {
-                return _redirect(context, '/dashboard');
-              }
-              if (!isLoggedIn) return _redirect(context, '/login');
-              if (!approved) return _redirect(context, '/pending');
-              if (!isAdminLike && !emailVerified) {
-                return _redirect(context, '/verifyEmail');
-              }
+// Alias en inglés (existente)
+          case '/observaciones/approve': {
+            if (!kObservacionesHabilitadas) return _redirect(context, '/dashboard');
+            if (!isLoggedIn) return _redirect(context, '/login');
+            if (!approved) return _redirect(context, '/pending');
+            if (!isAdminLike && !emailVerified) return _redirect(context, '/verifyEmail');
 
-              // Si viene obsId como String, validamos que no esté vacío.
-              final args = settings.arguments;
-              final String? obsId =
-              (args is String && args.trim().isNotEmpty)
-                  ? args.trim()
-                  : null;
-              if (obsId == null) {
-                return _redirect(context, '/observaciones/list');
-              }
+            final args = settings.arguments;
+            final String? obsId =
+            (args is String && args.trim().isNotEmpty) ? args.trim() : null;
+            if (obsId == null) return _redirect(context, '/observaciones/list');
 
-              // La pantalla leerá el obsId desde ModalRoute.
-              return const EditarObservacionScreen();
-            }
+            return AprobarObservacionScreen(observacionId: obsId);
+          }
 
-          case '/observaciones/editLocal':
-            {
-              if (!kObservacionesHabilitadas) {
-                return _redirect(context, '/dashboard');
-              }
-              if (!isLoggedIn) return _redirect(context, '/login');
-              if (!approved) return _redirect(context, '/pending');
-              if (!isAdminLike && !emailVerified) {
-                return _redirect(context, '/verifyEmail');
-              }
+// Alias en español (existente)
+          case '/observaciones/aprobar': {
+            if (!kObservacionesHabilitadas) return _redirect(context, '/dashboard');
+            if (!isLoggedIn) return _redirect(context, '/login');
+            if (!approved) return _redirect(context, '/pending');
+            if (!isAdminLike && !emailVerified) return _redirect(context, '/verifyEmail');
 
-              final args = (settings.arguments as Map?) ?? const {};
-              final String? dirPath = args['dirPath'] as String?;
+            final args = settings.arguments;
+            final String? obsId =
+            (args is String && args.trim().isNotEmpty) ? args.trim() : null;
+            if (obsId == null) return _redirect(context, '/observaciones/list');
 
-              if (dirPath == null || dirPath.trim().isEmpty) {
-                return _redirect(context, '/observaciones/list');
-              }
+            return AprobarObservacionScreen(observacionId: obsId);
+          }
 
-              // La pantalla leerá dirPath/meta desde ModalRoute.
-              return const EditarLocalObservacionScreen();
-            }
+
+          case '/observaciones/edit': {
+            if (!kObservacionesHabilitadas) return _redirect(context, '/dashboard');
+            if (!isLoggedIn) return _redirect(context, '/login');
+            if (!approved) return _redirect(context, '/pending');
+            if (!isAdminLike && !emailVerified) return _redirect(context, '/verifyEmail');
+
+            // Dejamos que la pantalla lea String o Map (obsId/id, readonly, etc.)
+            return const EditarObservacionScreen();
+          }
+
+
 
           default:
             if (!isLoggedIn) return const LoginScreen();
@@ -487,3 +453,4 @@ class Routes {
     return const SizedBox.shrink();
   }
 }
+

@@ -15,11 +15,23 @@
 //   5) Capacidades sobre Observaciones (crear/editar/moderar)
 //   6) Alias y azúcares semánticos para UI
 //   7) Menú/visibilidad UI
+//   8) Helpers V2 (flujo nuevo de observaciones)
+//   9) Compatibilidad FirestoreService
 // =============================================================
 
 import 'package:faunadmin2/models/rol.dart';
 import 'package:faunadmin2/models/usuario_rol_proyecto.dart';
 import 'package:faunadmin2/providers/auth_provider.dart';
+
+/// Estados V2 normalizados (minúsculas) para evitar errores de casing.
+class EstadosObsV2 {
+  static const borrador = 'borrador';
+  static const pendiente = 'pendiente';
+  static const revisarNuevo = 'revisar_nuevo';
+  static const rechazado = 'rechazado';
+  static const aprobado = 'aprobado';
+  static const archivado = 'archivado';
+}
 
 class PermisosService {
   // =============================================================
@@ -29,9 +41,8 @@ class PermisosService {
   PermisosService(this._auth);
 
   // (Legacy/UI) Estados viejos en MAYÚSCULAS.
-  // Nota: el módulo nuevo usa estados: borrador|pendiente|aprobado|rechazado|archivado.
   static const String kPendiente = 'PENDIENTE';
-  static const String kAprobado  = 'APROBADO';
+  static const String kAprobado = 'APROBADO';
   static const String kRechazado = 'RECHAZADO';
 
   // =============================================================
@@ -39,26 +50,22 @@ class PermisosService {
   // =============================================================
   UsuarioRolProyecto? get _sel => _auth.selectedRolProyecto;
 
-  int?    get _rolActual        => _sel?.idRol;
+  int? get _rolActual => _sel?.idRol;
   String? get _proyectoActualId => _sel?.idProyecto;
-  String? get _uidActual        => _auth.usuario?.uid;
+  String? get _uidActual => _auth.usuario?.uid;
 
   bool get isLoggedIn => _auth.isLoggedIn;
 
-  /// Admin Único (flag en documento de usuario)
   bool get isAdminUnico => _auth.usuario?.isAdmin == true;
 
-  // Compatibilidad histórica con “globales”
-  bool get isAdminGlobal => isAdminUnico; // Admin global ≡ Admin Único
-  bool get isDuenoGlobal => false;        // Dueño global eliminado
+  bool get isAdminGlobal => isAdminUnico;
+  bool get isDuenoGlobal => false;
 
-  /// Admin “like”: Admin Único o Admin rol en contexto
   bool get isAdminLike => isAdminUnico || isAdmin;
 
-  // Rol EN CONTEXTO (URP seleccionada)
-  bool get isAdmin        => _rolActual == Rol.admin;
-  bool get isSupervisor   => _rolActual == Rol.supervisor;
-  bool get isRecolector   => _rolActual == Rol.recolector;
+  bool get isAdmin => _rolActual == Rol.admin;
+  bool get isSupervisor => _rolActual == Rol.supervisor;
+  bool get isRecolector => _rolActual == Rol.recolector;
 
   bool get isDuenoEnContexto =>
       _rolActual == Rol.duenoProyecto &&
@@ -80,46 +87,56 @@ class PermisosService {
           _proyectoActualId != null &&
           _proyectoActualId!.isNotEmpty;
 
-  // Helpers internos
+  /// Recolector usando el rol pero SIN proyecto seleccionado
+  bool get isRecolectorSinProyecto =>
+      _rolActual == Rol.recolector &&
+          (_proyectoActualId == null || _proyectoActualId!.isEmpty);
+
   bool _sameProject(String? idProyecto) =>
       idProyecto != null && idProyecto == _proyectoActualId;
 
-  bool _isAuthor(String? uid) =>
-      uid != null && uid == _uidActual;
+  bool _isAuthor(String? uid) => uid != null && uid == _uidActual;
 
   // =============================================================
-  // 3) Conjuntos de proyectos por rol (para checar pertenencia)
+  // 3) Conjuntos de proyectos por rol
   // =============================================================
   Set<String> get projectIdsAsOwner => _auth.rolesProyectos
-      .where((r) => r.idRol == Rol.duenoProyecto && (r.idProyecto?.isNotEmpty ?? false))
+      .where(
+          (r) => r.idRol == Rol.duenoProyecto && (r.idProyecto?.isNotEmpty ?? false))
       .map((r) => r.idProyecto!)
       .toSet();
 
   Set<String> get projectIdsAsSupervisor => _auth.rolesProyectos
-      .where((r) => r.idRol == Rol.supervisor && (r.idProyecto?.isNotEmpty ?? false))
+      .where(
+          (r) => r.idRol == Rol.supervisor && (r.idProyecto?.isNotEmpty ?? false))
       .map((r) => r.idProyecto!)
       .toSet();
 
   Set<String> get projectIdsAsColaborador => _auth.rolesProyectos
-      .where((r) => r.idRol == Rol.colaborador && (r.idProyecto?.isNotEmpty ?? false))
+      .where(
+          (r) => r.idRol == Rol.colaborador && (r.idProyecto?.isNotEmpty ?? false))
       .map((r) => r.idProyecto!)
       .toSet();
 
   Set<String> get projectIdsAsRecolector => _auth.rolesProyectos
-      .where((r) => r.idRol == Rol.recolector && (r.idProyecto?.isNotEmpty ?? false))
+      .where(
+          (r) => r.idRol == Rol.recolector && (r.idProyecto?.isNotEmpty ?? false))
       .map((r) => r.idProyecto!)
       .toSet();
 
   bool get hasAnyCollaborator =>
       _auth.rolesProyectos.any((r) => r.idRol == Rol.colaborador);
 
+  /// 🔹 NUEVO: ¿tiene algún URP de Recolector sin proyecto? (global)
+  bool get hasRecolectorSinProyectoGlobal => _auth.rolesProyectos.any(
+        (r) =>
+    r.idRol == Rol.recolector &&
+        (r.idProyecto == null || r.idProyecto!.isEmpty),
+  );
+
   // =============================================================
   // 4) Capacidades de navegación (Proyectos)
   // =============================================================
-
-  /// Ver listado de Proyectos:
-  /// - Admin Único
-  /// - Cualquier usuario con >= 1 proyecto asignado (cualquier rol)
   bool get canViewProjects {
     if (isAdminUnico || isAdmin) return true;
     if (projectIdsAsOwner.isNotEmpty) return true;
@@ -129,33 +146,19 @@ class PermisosService {
     return false;
   }
 
-  /// Crear proyecto: solo Admin Único.
   bool get canCreateProject => isAdminUnico;
-
-  /// Editar el proyecto en contexto:
-  /// - Admin Único
-  /// - (Opcional) Admin rol en contexto
-  /// - Dueño en contexto
   bool get canEditProject => isAdminUnico || isAdmin || isDuenoEnContexto;
 
-  /// Editar proyecto por id explícito
   bool canEditProjectFor(String projectId) {
     if (isAdminUnico || isAdmin) return true;
     return isDuenoEnContexto && _proyectoActualId == projectId;
   }
 
-  /// Borrar proyecto: solo Admin Único.
   bool get canDeleteProject => isAdminUnico;
 
-  /// Gestionar colaboradores del proyecto en contexto:
-  /// - Admin Único
-  /// - Admin rol en contexto
-  /// - Dueño en contexto
-  /// - Supervisor en contexto
   bool get canManageCollaborators =>
       isAdminUnico || isAdmin || isDuenoEnContexto || isSupervisorEnContexto;
 
-  /// Variante explícita por proyecto.
   bool canManageCollaboratorsFor(String projectId) {
     if (isAdminUnico || isAdmin) return true;
     final same = (_proyectoActualId != null && _proyectoActualId == projectId);
@@ -163,7 +166,6 @@ class PermisosService {
     return isDuenoEnContexto || isSupervisorEnContexto;
   }
 
-  /// ¿Puede ver un proyecto específico?
   bool canViewProject(String proyectoId) {
     if (isAdminUnico || isAdmin) return true;
     if (projectIdsAsOwner.contains(proyectoId)) return true;
@@ -174,25 +176,19 @@ class PermisosService {
   }
 
   // =============================================================
-  // 5) Capacidades sobre Observaciones
+  // 5) Capacidades sobre Observaciones (legacy)
   // =============================================================
-
-  /// Ver Observaciones: con sesión basta; la UI limitará por proyecto.
   bool get canViewObservations => isLoggedIn;
 
-  /// Crear Observaciones (en UI general):
-  /// - SIN proyecto en contexto: Admin Único o Recolector (captura suelta)
-  /// - CON proyecto en contexto: Admin Único / Admin / Supervisor / Dueño / Colaborador
-  ///   (NO Recolector en proyecto)
   bool get canAddObservation {
     if (!isLoggedIn) return false;
 
-    // Sin proyecto en contexto → captura suelta (recolector o admin)
+    // 🔹 Sin proyecto: reusar la misma lógica de creación sin proyecto
     if (_proyectoActualId == null || _proyectoActualId!.isEmpty) {
-      return isAdminUnico || isRecolector;
+      return canCreateObservationSinProyecto;
     }
 
-    // Con proyecto en contexto → sin recolector
+    // 🔹 Con proyecto en contexto: lógica normal por URP
     return isAdminUnico ||
         isAdmin ||
         isSupervisorEnContexto ||
@@ -200,10 +196,6 @@ class PermisosService {
         isColaboradorEnContexto;
   }
 
-  /// ¿Puede crear una observación en el proyecto {projectId}?
-  /// - Admin Único / Admin → siempre
-  /// - Si el proyecto coincide con el del contexto → Supervisor / Dueño / Colaborador
-  /// - Recolector: NO dentro de proyecto
   bool canCreateObservationInProject(String projectId) {
     if (isAdminUnico || isAdmin) return true;
     final same = (_proyectoActualId != null && _proyectoActualId == projectId);
@@ -211,31 +203,31 @@ class PermisosService {
     return isSupervisorEnContexto || isDuenoEnContexto || isColaboradorEnContexto;
   }
 
-  /// Crear observación SIN proyecto (captura suelta):
-  /// - Admin Único y Recolector
+  /// 🔹 QUIÉN puede crear observaciones **sin proyecto**
   bool get canCreateObservationSinProyecto {
     if (!isLoggedIn) return false;
-    return isAdminUnico || isRecolector;
+
+    // 1) Admin único siempre puede
+    if (isAdminUnico) return true;
+
+    // 2) Recolector en contexto sin proyecto (cuando seleccionó ese rol)
+    if (isRecolectorSinProyecto) return true;
+
+    // 3) Recolector global (URP de recolector sin proyecto, aunque no esté seleccionado)
+    if (hasRecolectorSinProyectoGlobal) return true;
+
+    return false;
   }
 
-  /// Aprobar/Rechazar Observaciones (visión general de menús):
-  /// - Admin Único / Admin en contexto
-  /// - Supervisor en contexto
-  /// - Dueño en contexto   👈
   bool get canApproveObservation =>
       isAdminUnico || isAdmin || isSupervisorEnContexto || isDuenoEnContexto;
 
-  /// Variante por proyecto (observación pertenece a projectId)
-  /// (Compatibilidad: sin validar autor)
   bool canApproveObservationForProject(String projectId) {
     if (isAdminUnico || isAdmin) return true;
     final same = (_proyectoActualId != null && _proyectoActualId == projectId);
     return same && (isSupervisorEnContexto || isDuenoEnContexto);
   }
 
-  /// ✅ Nueva: moderar UNA observación concreta evitando auto-aprobación.
-  /// - Admin Único / Admin: siempre
-  /// - Supervisor/Dueño: mismo proyecto Y que NO sean autores
   bool canApproveObservationFor({
     required String projectId,
     required String? uidAutor,
@@ -246,50 +238,39 @@ class PermisosService {
     return same && notOwn && (isSupervisorEnContexto || isDuenoEnContexto);
   }
 
-  /// ¿Puede editar una observación concreta?
-  /// - Autor si está PENDIENTE (legacy; para UI antigua)
-  /// - Admin Único/Admin
-  /// - Supervisor en el mismo proyecto
   bool canEditObservation({
     required String uidAutor,
     required String estado,
     String? idProyectoObs,
   }) {
     if (!isLoggedIn) return false;
-    if (_isAuthor(uidAutor) && estado == kPendiente) return true; // legacy
+    if (_isAuthor(uidAutor) && estado == kPendiente) return true;
     if (isAdminUnico || isAdmin) return true;
     if (isSupervisorEnContexto && _sameProject(idProyectoObs)) return true;
     return false;
   }
 
-  /// ¿Puede borrar una observación?
-  /// - Admin Único/Admin
-  /// (Opcional) Autor si está PENDIENTE (descomentable si se requiere)
   bool canDeleteObservation({
     required String uidAutor,
     String? idProyectoObs,
     String? estado,
   }) {
     if (isAdminUnico || isAdmin) return true;
-    // if (_isAuthor(uidAutor) && estado == kPendiente) return true;
+    if ((estado ?? '').toLowerCase() == 'borrador' && _isAuthor(uidAutor)) {
+      return true;
+    }
     return false;
   }
 
-  /// —— Alias requerido por FirestoreService (Observaciones) ——
-  /// Regla de compatibilidad: Admin Único/Admin o Supervisor/Dueño del mismo proyecto.
-  bool canModerateProject(String projectId) {
-    return canApproveObservationForProject(projectId);
-  }
+  bool canModerateProject(String projectId) =>
+      canApproveObservationForProject(projectId);
 
   // =============================================================
   // 6) Alias y azúcares semánticos para UI
   // =============================================================
-
-  /// Azúcar semántico para UI: “asignar colaborador”
   bool canAssignCollaboratorFor(String projectId) =>
       canManageCollaboratorsFor(projectId);
 
-  /// Asignar supervisor a un proyecto: solo Admin Único.
   bool get canAssignSupervisor => isAdminUnico;
 
   // =============================================================
@@ -297,17 +278,16 @@ class PermisosService {
   // =============================================================
   Map<String, bool> buildMenuVisibility() {
     return {
-      'menu_proyectos'        : canViewProjects,
-      'menu_nuevo_proyecto'   : canCreateProject,
-      'menu_observaciones'    : canViewObservations,
+      'menu_proyectos': canViewProjects,
+      'menu_nuevo_proyecto': canCreateProject,
+      'menu_observaciones': canViewObservations,
       'menu_observacion_nueva': canAddObservation,
-      'menu_aprobaciones'     : canApproveObservation,
-      'menu_colaboradores'    : canManageCollaborators,
-      'menu_admin_panel'      : isAdminGlobal || isAdmin, // isAdminGlobal ≡ Admin Único
+      'menu_aprobaciones': canApproveObservation,
+      'menu_colaboradores': canManageCollaborators,
+      'menu_admin_panel': isAdminGlobal || isAdmin,
     };
   }
 
-  /// Helper para UI de “Equipo” (tabs/pestañas)
   bool get showSupervisoresTab => isAdminUnico;
 
   bool showColaboradoresTabFor(String projectId) =>
@@ -315,4 +295,133 @@ class PermisosService {
           isAdmin ||
           (isDuenoEnContexto && _proyectoActualId == projectId) ||
           (isSupervisorEnContexto && _proyectoActualId == projectId);
+
+  // =============================================================
+  // 8) Helpers V2 (flujo nuevo de observaciones)
+  // =============================================================
+  bool canEditObsV2({
+    required String? idProyecto,
+    required String uidAutor,
+    required String estado,
+  }) {
+    final e = estado.toLowerCase();
+    if (!isLoggedIn) return false;
+
+    if (e == EstadosObsV2.borrador) {
+      return _isAuthor(uidAutor) || isAdminUnico || isAdmin;
+    }
+
+    if (e == EstadosObsV2.pendiente || e == EstadosObsV2.revisarNuevo) {
+      return isAdminUnico ||
+          isAdmin ||
+          (isSupervisorEnContexto && _sameProject(idProyecto)) ||
+          (isDuenoEnContexto && _sameProject(idProyecto));
+    }
+
+    if (e == EstadosObsV2.rechazado) {
+      return _isAuthor(uidAutor) ||
+          isAdminUnico ||
+          isAdmin ||
+          (isSupervisorEnContexto && _sameProject(idProyecto)) ||
+          (isDuenoEnContexto && _sameProject(idProyecto));
+    }
+
+    return isAdminUnico || isAdmin;
+  }
+
+  bool canDeleteObsV2({
+    required String? idProyecto,
+    required String uidAutor,
+    required String estado,
+  }) {
+    final e = estado.toLowerCase();
+
+    if (e == EstadosObsV2.borrador) {
+      return _isAuthor(uidAutor) || isAdminUnico || isAdmin;
+    }
+
+    if (e == EstadosObsV2.pendiente || e == EstadosObsV2.revisarNuevo) {
+      return isAdminUnico ||
+          isAdmin ||
+          (isSupervisorEnContexto && _sameProject(idProyecto)) ||
+          (isDuenoEnContexto && _sameProject(idProyecto));
+    }
+
+    if (e == EstadosObsV2.rechazado) {
+      return _isAuthor(uidAutor) ||
+          isAdminUnico ||
+          isAdmin ||
+          (isSupervisorEnContexto && _sameProject(idProyecto)) ||
+          (isDuenoEnContexto && _sameProject(idProyecto));
+    }
+
+    return isAdminUnico || isAdmin;
+  }
+
+  bool canSubmitToPending({
+    required String uidAutor,
+    required String estadoActual,
+    required bool datosCompletos,
+  }) {
+    if ((estadoActual.toLowerCase() != EstadosObsV2.borrador) ||
+        !datosCompletos) return false;
+    return _isAuthor(uidAutor) || isAdminUnico || isAdmin;
+  }
+
+  bool canModeratePending({
+    required String? idProyecto,
+    required String? uidAutor,
+  }) {
+    if (isAdminUnico || isAdmin) return true;
+    final same = _sameProject(idProyecto);
+    final notOwn = uidAutor == null ? true : !_isAuthor(uidAutor);
+    return same && notOwn && (isSupervisorEnContexto || isDuenoEnContexto);
+  }
+
+  bool canResubmitRejected({
+    required String? idProyecto,
+    required String uidAutor,
+    required DateTime? rejectedAt,
+    required DateTime? updatedAt,
+  }) {
+    final puedeEditar = canEditObsV2(
+      idProyecto: idProyecto,
+      uidAutor: uidAutor,
+      estado: EstadosObsV2.rechazado,
+    );
+    final fueEditadoDespues =
+        rejectedAt != null && updatedAt != null && updatedAt.isAfter(rejectedAt);
+    return puedeEditar && fueEditadoDespues;
+  }
+
+  String? blockedReasonV2({
+    required String? idProyecto,
+    required String uidAutor,
+    required String estado,
+  }) {
+    if (canEditObsV2(idProyecto: idProyecto, uidAutor: uidAutor, estado: estado)) {
+      return null;
+    }
+    final e = estado.toLowerCase();
+    switch (e) {
+      case EstadosObsV2.borrador:
+        return 'Solo el autor o un admin pueden editar el borrador.';
+      case EstadosObsV2.pendiente:
+      case EstadosObsV2.revisarNuevo:
+        return 'Solo un supervisor/dueño del mismo proyecto o admin pueden editar en Pendiente.';
+      case EstadosObsV2.rechazado:
+        return 'Las observaciones rechazadas solo las puede editar el autor, un supervisor del proyecto o un admin.';
+      case EstadosObsV2.aprobado:
+      case EstadosObsV2.archivado:
+        return 'Las observaciones $estado solo las puede editar un admin.';
+      default:
+        return 'No tienes permisos para editar esta observación.';
+    }
+  }
+
+  // =============================================================
+  // 9) Compatibilidad FirestoreService
+  // =============================================================
+  bool canModerateProjectCompat(String projectId) =>
+      canApproveObservationForProject(projectId);
 }

@@ -1,24 +1,21 @@
-// lib/ui/screens/dashboard_screen.dart
+// lib/ui/screens/dashboard_screen.dart (versión PRO auto-sync, sin botones manuales)
+import 'dart:convert';
+import 'dart:io' show File; // <-- para mostrar thumbs locales con Image.file
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-
-import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
+import 'package:flutter/foundation.dart'
+    show kIsWeb, defaultTargetPlatform, TargetPlatform;
 
 import 'package:faunadmin2/providers/auth_provider.dart';
-// import 'package:faunadmin2/providers/notificacion_provider.dart';           // TODO: Rehabilitar notificaciones
-// import 'package:faunadmin2/models/notificacion.dart';                       // TODO: Rehabilitar notificaciones
-// import 'package:faunadmin2/utils/notificaciones_constants.dart';            // TODO: Rehabilitar notificaciones
-
-// Drawer
 import 'package:faunadmin2/ui/widgets/app_drawer.dart';
-
-// Sync + almacenamiento local
 import 'package:faunadmin2/services/local_file_storage.dart';
-import 'package:faunadmin2/services/sync_observaciones_service.dart';
-
-// Para leer nombre_completo desde Firestore
+import 'package:faunadmin2/services/auto_sync_observaciones_service.dart';
+import 'package:faunadmin2/models/observacion.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart' as fb;
+
+// === Configuración ===
+const Duration kVentanaBorradoresRecientes = Duration(days: 30);
 
 class DashboardScreen extends StatefulWidget {
   final bool skipAutoNavFromRoute;
@@ -29,36 +26,31 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
-  // ---- Nombre desde Firestore
   String? _fullNameFromDb;
-
-  // ---- Sync state
-  bool _syncing = false;
   int _pendientesLocal = 0;
 
-  // ✅ Seguro para web: sin importar dart:io
   bool get _isMobile {
     if (kIsWeb) return false;
     return defaultTargetPlatform == TargetPlatform.android ||
         defaultTargetPlatform == TargetPlatform.iOS;
   }
 
+  // cache para nombres de proyecto
+  final Map<String, String> _projNameCache = {};
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
 
-      // TODO: Rehabilitar notificaciones
-      // context.read<NotificacionProvider>().start();
+      // Lanzamos las tareas asíncronas SIN await (para no mezclar await + context)
+      _loadNombreCompleto();
 
-      await _loadNombreCompleto();
-
-      // Solo en móvil tocamos el filesystem local
       if (_isMobile) {
-        await _refreshPendingLocal();
-        // (Opcional) Auto-sync silencioso al abrir si hay pendientes
-        // if (_pendientesLocal > 0) _runSync(showSnackbars: false);
+        // Arrancamos el autosync (escucha conectividad + sube en segundo plano)
+        AutoSyncObservacionesService.instance.start(context);
+        _refreshPendingLocal();
       }
     });
   }
@@ -67,19 +59,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       final uid = fb.FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) return;
-      final doc = await FirebaseFirestore.instance.collection('usuarios').doc(uid).get();
+      final doc = await FirebaseFirestore.instance
+          .collection('usuarios')
+          .doc(uid)
+          .get();
       final data = doc.data();
-      final nombre = (data != null ? (data['nombre_completo'] as String?) : null)?.trim();
+      final nombre =
+      (data != null ? (data['nombre_completo'] as String?) : null)?.trim();
       if (!mounted) return;
       if (nombre != null && nombre.isNotEmpty) {
         setState(() => _fullNameFromDb = nombre);
       }
-    } catch (_) {
-      // Silencioso: si falla, se usa displayName de Auth o 'Usuario'
+    } catch (e) {
+      debugPrint('[DASH] _loadNombreCompleto error: $e');
+      // Silencioso
     }
   }
 
-  // Cuenta carpetas locales que NO estén marcadas como SYNCED (solo móvil)
   Future<void> _refreshPendingLocal() async {
     if (!_isMobile) return;
     try {
@@ -93,53 +89,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
       if (!mounted) return;
       setState(() => _pendientesLocal = count);
-    } catch (_) {
+      debugPrint('[DASH] Pendientes locales detectados: $count');
+    } catch (e) {
+      debugPrint('[DASH] _refreshPendingLocal error: $e');
       if (!mounted) return;
       setState(() => _pendientesLocal = 0);
-    }
-  }
-
-  // Ejecuta la sincronización con la nube usando el servicio (solo móvil)
-  Future<void> _runSync({bool showSnackbars = true}) async {
-    if (!_isMobile) {
-      if (showSnackbars && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('La sincronización local solo está disponible en Android/iOS.')),
-        );
-      }
-      return;
-    }
-
-    if (_syncing) return;
-    setState(() => _syncing = true);
-
-    try {
-      final svc = SyncObservacionesService();
-
-      final result = await svc.syncPending(
-        context: context,
-        deleteLocalAfterUpload: true,
-        onLog: (msg) => debugPrint('[SYNC] $msg'),
-        onProgress: (done, total) => debugPrint('[SYNC] progreso $done / $total'),
-      );
-
-      await _refreshPendingLocal();
-
-      if (showSnackbars && mounted) {
-        final ok = result.uploadedCount;
-        final skipped = result.skippedCount;
-        final failed = result.failedCount;
-        final msg = 'Sincronización: $ok subidas, $skipped omitidas, $failed fallidas.';
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-      }
-    } catch (e) {
-      if (showSnackbars && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error al sincronizar: $e')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _syncing = false);
     }
   }
 
@@ -147,18 +101,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthProvider>();
 
-    // ===== NOTIFICACIONES DESACTIVADAS =====
-    const int unreadCount = 0;
-
-    // Preferir nombre_completo de Firestore; fallback a displayName de Auth
     final firebaseDisplayName =
-    (auth.user?.displayName?.trim().isNotEmpty ?? false) ? auth.user!.displayName!.trim() : null;
+    (auth.user?.displayName?.trim().isNotEmpty ?? false)
+        ? auth.user!.displayName!.trim()
+        : null;
     final displayName = (_fullNameFromDb?.isNotEmpty ?? false)
         ? _fullNameFromDb!
         : (firebaseDisplayName ?? 'Usuario');
 
     final correo = auth.user?.email ?? '—';
     final cs = Theme.of(context).colorScheme;
+
+    // TODO: cuando tengas el código del rol activo en el AuthProvider,
+    // pásalo aquí para filtrar por rol en el dashboard.
+    // Ejemplo (ajusta el nombre de la propiedad):
+    // final rolCodigo = auth.rolActivoCodigo;
+    const String? rolCodigo = null;
 
     return Scaffold(
       drawer: const AppDrawer(),
@@ -170,160 +128,105 @@ class _DashboardScreenState extends State<DashboardScreen> {
             tooltip: MaterialLocalizations.of(ctx).openAppDrawerTooltip,
           ),
         ),
-        // Saludo usando el primer nombre del nombre_completo (o fallback)
         title: Text('Hola, ${displayName.split(' ').first}'),
-        actions: [
-          // Botón de sincronizar en AppBar (solo móvil)
-          if (_isMobile)
-            IconButton(
-              tooltip: _pendientesLocal > 0
-                  ? 'Sincronizar ($_pendientesLocal pendiente${_pendientesLocal == 1 ? '' : 's'})'
-                  : 'Sincronizar',
-              onPressed: _syncing ? null : () => _runSync(showSnackbars: true),
-              icon: _syncing
-                  ? const SizedBox(
-                  height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                  : const Icon(Icons.cloud_upload_outlined),
-            ),
-
-          if (unreadCount > 0)
-            const Padding(
-              padding: EdgeInsets.only(right: 12),
-              child: _UnreadDot(),
-            ),
-        ],
+        // 🔕 Sin acciones de sync manuales
       ),
       body: RefreshIndicator(
         onRefresh: () async {
           await _loadNombreCompleto();
           if (_isMobile) await _refreshPendingLocal();
+          if (mounted) setState(() {});
         },
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
           physics: const AlwaysScrollableScrollPhysics(),
           children: [
-            // ===== ENCABEZADO =====
-            _HeaderCard(
-              name: displayName,
-              email: correo,
-              onSubirDatosElegirRol: () => Navigator.of(context).pushNamed('/seleccion'),
+            _HeaderCardSimple(name: displayName, email: correo),
+            const SizedBox(height: 14),
+
+            // CTA principal
+            _AddObservationCTA(
+              onTap: () => Navigator.of(context).pushNamed('/seleccion'),
             ),
             const SizedBox(height: 14),
 
-            // ===== KPIs simples =====
-            Row(
-              children: [
-                Expanded(
-                  child: _KpiCard(
-                    icon: Icons.person_outline,
-                    label: 'Usuario',
-                    value: displayName, // ⬅️ nombre_completo
-                    color: cs.primary,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: _KpiCard(
-                    icon: Icons.email_outlined,
-                    label: 'Correo',
-                    value: correo,
-                    color: cs.tertiary,
-                    compact: true,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // ===== Tarjeta de sincronización (solo móvil) =====
+            // Info de sincronización automática + estado
             if (_isMobile)
-              _SyncCard(
+              _SyncStrip(
                 pendientes: _pendientesLocal,
-                syncing: _syncing,
-                onSync: _runSync,
-              )
-            else
-              Container(
-                padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(14),
-                  color: cs.surface,
-                  border: Border.all(color: cs.outline.withOpacity(.16)),
-                ),
-                child: const Text(
-                  'La sincronización local (archivos en el dispositivo) está disponible solo en Android/iOS.',
-                  style: TextStyle(color: Colors.black54),
-                ),
               ),
+            if (!_isMobile)
+              const _InfoBox(
+                  text:
+                  'La sincronización local automática está disponible solo en Android/iOS.'),
 
             const SizedBox(height: 16),
 
-            // Placeholder mientras notificaciones siguen en pausa
-            Container(
-              padding: const EdgeInsets.symmetric(vertical: 24, horizontal: 16),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                color: cs.surface,
-                border: Border.all(color: cs.outline.withOpacity(.16)),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: const [
-                  Text('Módulos en pausa', style: TextStyle(fontWeight: FontWeight.w700)),
-                  SizedBox(height: 8),
-                  Text(
-                    'Las notificaciones están temporalmente desactivadas.',
-                    style: TextStyle(color: Colors.black54),
-                  ),
-                ],
-              ),
+            // Proyectos y Observaciones (borradores) => Local + Nube
+            _ProyectosResumenCard(
+              fetchProyectoNombre: _fetchProyectoNombre,
+              ctxRolCodigo: rolCodigo,
+            ),
+
+            const SizedBox(height: 24),
+
+            // Placeholder de sección de notificaciones (espacio reservado)
+            const _InfoBox(
+              text:
+              '🔔 Notificaciones (aprobadas, rechazadas, cambios, eliminaciones) — próximamente.',
             ),
           ],
         ),
       ),
     );
   }
+
+  // ===== helpers de proyecto =====
+
+  Future<String?> _fetchProyectoNombre(String id) async {
+    if (id.isEmpty) return null;
+    if (_projNameCache.containsKey(id)) return _projNameCache[id];
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('proyectos')
+          .doc(id)
+          .get();
+      final nombre = (snap.data()?['nombre'] as String?)?.trim();
+      if (nombre != null && nombre.isNotEmpty) {
+        _projNameCache[id] = nombre;
+        return nombre;
+      }
+    } catch (e) {
+      debugPrint('[DASH] _fetchProyectoNombre($id) error: $e');
+    }
+    return null;
+  }
 }
 
-class _UnreadDot extends StatelessWidget {
-  const _UnreadDot();
+// ================= UI =================
+
+class _InfoBox extends StatelessWidget {
+  final String text;
+  const _InfoBox({required this.text});
   @override
   Widget build(BuildContext context) {
-    return Stack(
-      alignment: Alignment.center,
-      children: const [
-        Icon(Icons.notifications),
-        Positioned(
-          right: 2,
-          top: 8,
-          child: SizedBox(
-            width: 10,
-            height: 10,
-            child: DecoratedBox(
-              decoration: BoxDecoration(color: Colors.red, shape: BoxShape.circle),
-            ),
-          ),
-        )
-      ],
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(14),
+        color: cs.surface,
+        border: Border.all(color: cs.outline.withOpacity(.16)),
+      ),
+      child: Text(text, style: const TextStyle(color: Colors.black54)),
     );
   }
 }
 
-// ========================= WIDGETS DE UI =========================
-
-class _HeaderCard extends StatelessWidget {
+class _HeaderCardSimple extends StatelessWidget {
   final String name;
   final String email;
-  final VoidCallback onSubirDatosElegirRol;
-  final VoidCallback? onMarkAllRead;
-
-  const _HeaderCard({
-    required this.name,
-    required this.email,
-    required this.onSubirDatosElegirRol,
-    this.onMarkAllRead,
-  });
-
+  const _HeaderCardSimple({required this.name, required this.email});
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -347,92 +250,14 @@ class _HeaderCard extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           Expanded(
-            child: DefaultTextStyle(
-              style: Theme.of(context).textTheme.bodyMedium!,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-                  const SizedBox(height: 2),
-                  Text(email, style: const TextStyle(color: Colors.black54)),
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: -6,
-                    children: [
-                      ActionChip(
-                        avatar: const Icon(Icons.upload_rounded, size: 18),
-                        label: const Text('Subir datos (elegir rol/proyecto)'),
-                        onPressed: onSubirDatosElegirRol,
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 6),
-          TextButton.icon(
-            onPressed: onMarkAllRead, // inactivo mientras no haya notificaciones
-            icon: const Icon(Icons.mark_email_read_outlined),
-            label: const Text('Marcar todo\ncomo leído'),
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              foregroundColor: Theme.of(context).colorScheme.primary,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _KpiCard extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-  final Color color;
-  final bool compact;
-
-  const _KpiCard({
-    required this.icon,
-    required this.label,
-    required this.value,
-    required this.color,
-    this.compact = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(14),
-        color: cs.surface,
-        border: Border.all(color: cs.outline.withOpacity(.16)),
-        boxShadow: [BoxShadow(blurRadius: 10, offset: const Offset(0, 2), color: Colors.black.withOpacity(0.05))],
-      ),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 18,
-            backgroundColor: color.withOpacity(.12),
-            child: Icon(icon, color: color, size: 20),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+                Text(name,
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 2),
-                Text(
-                  value,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: compact ? 12 : 16, fontWeight: FontWeight.w700),
-                ),
+                Text(email, style: const TextStyle(color: Colors.black54)),
               ],
             ),
           ),
@@ -442,21 +267,63 @@ class _KpiCard extends StatelessWidget {
   }
 }
 
-// ---- TARJETA DE SINCRONIZACIÓN ----
-class _SyncCard extends StatelessWidget {
-  final int pendientes;
-  final bool syncing;
-  final Future<void> Function({bool showSnackbars}) onSync;
+// ===== CTA aparte: Agregar observación =====
+class _AddObservationCTA extends StatelessWidget {
+  final VoidCallback onTap;
+  const _AddObservationCTA({required this.onTap});
 
-  const _SyncCard({
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.outline.withOpacity(.16)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      child: Row(
+        children: [
+          const Icon(Icons.add_circle_outline),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Agregar observaciones',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          SizedBox(
+            height: 40,
+            child: OutlinedButton.icon(
+              onPressed: onTap,
+              icon: const Icon(Icons.add),
+              label: const Text('Agregar observación'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ===== Strip de sincronización (solo informativa, sin botón) =====
+class _SyncStrip extends StatelessWidget {
+  final int pendientes;
+
+  const _SyncStrip({
     required this.pendientes,
-    required this.syncing,
-    required this.onSync,
   });
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final hasPending = pendientes > 0;
+
+    final String line1 = hasPending
+        ? '$pendientes observación(es) guardadas en el teléfono.'
+        : 'No hay observaciones locales pendientes por subir.';
+    const String line2 =
+        'Cuando el dispositivo tenga conexión a internet, la app las subirá automáticamente a la nube.';
 
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
@@ -470,45 +337,778 @@ class _SyncCard extends StatelessWidget {
           CircleAvatar(
             radius: 20,
             backgroundColor: cs.primary.withOpacity(.10),
-            child: const Icon(Icons.sync, size: 22),
+            child: const Icon(Icons.cloud_sync_rounded, size: 22),
           ),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Sincronizar observaciones guardadas',
+                const Text('Sincronización automática',
                     style: TextStyle(fontWeight: FontWeight.w700)),
                 const SizedBox(height: 2),
                 Text(
-                  pendientes == 0
-                      ? 'No hay observaciones por subir desde el teléfono.'
-                      : '$pendientes observación(es) lista(s) para subir desde el teléfono.',
-                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  line1,
+                  style: const TextStyle(fontSize: 12, color: Colors.black87),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  line2,
+                  style: TextStyle(fontSize: 12, color: Colors.black54),
                 ),
               ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          FilledButton.icon(
-            onPressed: syncing ? null : () => onSync(showSnackbars: true),
-            icon: syncing
-                ? const SizedBox(
-              height: 16,
-              width: 16,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-                : const Icon(Icons.cloud_upload_outlined),
-            label: Text(syncing ? 'Sincronizando…' : 'Sincronizar'),
-            // 🔧 FIX: fuerza tamaño finito y evita minHeight 64 que rompía el sliver
-            style: FilledButton.styleFrom(
-              minimumSize: const Size(0, 40),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
             ),
           ),
         ],
       ),
     );
   }
+}
+
+// =========================
+// PROYECTOS: modelo + carga + UI
+// =========================
+
+class ObsResumen {
+  final String id;
+  final String titulo;
+  final String? nombreCientifico;
+  final DateTime? fecha;
+  final String? thumb; // base64 o 'URL::http...' o 'FILE::/ruta'
+  final String origen; // 'local' | 'nube'
+  ObsResumen({
+    required this.id,
+    required this.titulo,
+    required this.nombreCientifico,
+    required this.fecha,
+    required this.thumb,
+    required this.origen,
+  });
+}
+
+class ProyectoResumen {
+  final String id;
+  final String nombre;
+  final List<ObsResumen> local;
+  final List<ObsResumen> nube;
+  ProyectoResumen({
+    required this.id,
+    required this.nombre,
+    required this.local,
+    required this.nube,
+  });
+
+  int get totalBorradores => local.length + nube.length;
+}
+
+String _safeStr(dynamic v) => (v == null) ? '' : v.toString().trim();
+
+/// ====== Helpers de título preferido (científico > común > título crudo)
+String? _preferSciName(Map<String, dynamic> m) {
+  final cand = [
+    // claves típicas cloud
+    m['especie_nombre_cientifico'],
+    m['nombre_cientifico'],
+    m['taxon_nombre_cientifico'],
+    m['scientific_name'],
+    (m['especie'] is Map ? (m['especie'] as Map)['nombre_cientifico'] : null),
+    (m['taxon'] is Map ? (m['taxon'] as Map)['nombre_cientifico'] : null),
+
+    // ⚠️ clave usada en locales
+    m['especie_nombre'],
+  ];
+  for (final c in cand) {
+    final s = _safeStr(c);
+    if (s.isNotEmpty) return s;
+  }
+  return null;
+}
+
+String? _preferCommonName(Map<String, dynamic> m) {
+  final cand = [
+    m['especie_nombre_comun'],
+    m['nombre_comun'],
+    m['common_name'],
+    (m['especie'] is Map ? (m['especie'] as Map)['nombre_comun'] : null),
+  ];
+  for (final c in cand) {
+    final s = _safeStr(c);
+    if (s.isNotEmpty) return s;
+  }
+  return null;
+}
+
+// Miniatura: primera URL http(s) de una lista dinámica (media_urls)
+String? _firstHttpFromList(dynamic v) {
+  if (v is List) {
+    for (final e in v) {
+      final s = _safeStr(e);
+      if (s.startsWith('http://') || s.startsWith('https://')) return s;
+    }
+  }
+  return null;
+}
+
+// Carga combinada de borradores por proyecto (Local + Nube)
+Future<List<ProyectoResumen>> cargarProyectosConBorradores({
+  int maxProjects = 4,
+  int maxItemsPorOrigen = 6,
+  Future<String?> Function(String id)? fetchProyectoNombre,
+  String? ctxRolCodigo, // <- opcional: filtrar por rol
+}) async {
+  final Map<String, ProyectoResumen> mapa = {};
+  final Map<String, String> nombreProyecto = {};
+
+  // 1) Local (borradores)
+  if (!kIsWeb) {
+    try {
+      final local = LocalFileStorage.instance;
+      final dirs = await local.listarObservaciones();
+      debugPrint('[DASH] Local: carpetas encontradas = ${dirs.length}');
+      final metas = await Future.wait(
+          dirs.map((d) async => (dir: d, meta: await local.leerMeta(d))));
+      int contDescartadas = 0;
+      int contOk = 0;
+
+      for (final e in metas) {
+        final m = e.meta;
+        if (m == null) {
+          contDescartadas++;
+          continue;
+        }
+
+        // rol de contexto en draft local (si existe)
+        final ctxRolMeta =
+        _safeStr(m['ctx_rol'] ?? m['ctxRol'] ?? m['rol_codigo']);
+        if (ctxRolCodigo != null &&
+            ctxRolMeta.isNotEmpty &&
+            ctxRolMeta != ctxRolCodigo) {
+          // borrador de otro rol → no se muestra
+          contDescartadas++;
+          continue;
+        }
+
+        // status/estado tolerante
+        final estado = _safeStr(m['estado']).toLowerCase();
+        final status = _safeStr(m['status']).toUpperCase();
+        final esBorrador = estado == 'borrador' || status != 'SYNCED';
+        if (!esBorrador) {
+          contDescartadas++;
+          continue;
+        }
+
+        final pid = _safeStr(m['id_proyecto'] ??
+            m['proyecto_id'] ??
+            m['project_id'] ??
+            m['proyectoId']);
+        // Si no tiene proyecto, lo agrupamos como "Sin proyecto"
+        final keyProyecto = pid.isEmpty ? '__SIN_PROYECTO__' : pid;
+
+        final pname = _safeStr(m['proyecto_nombre'] ??
+            m['proyecto'] ??
+            m['project_name'] ??
+            m['nombre_proyecto']);
+        if (pname.isNotEmpty) {
+          nombreProyecto[keyProyecto] = pname;
+        } else if (pid.isEmpty) {
+          nombreProyecto['__SIN_PROYECTO__'] = 'Sin proyecto';
+        }
+
+        // ===== título preferido (científico > común > fallback)
+        final sci = _preferSciName(m);
+        final common = _preferCommonName(m);
+        final titulo = (sci != null && sci.isNotEmpty)
+            ? sci
+            : (common != null && common.isNotEmpty)
+            ? common
+            : 'Sin especie';
+
+        final tsStr = _safeStr(m['updated_local_at'] ??
+            m['created_local_at'] ??
+            m['ultima_modificacion']);
+        final ts = tsStr.isEmpty ? null : DateTime.tryParse(tsStr);
+
+        // Thumb local: base64 -> si no hay, primera foto como FILE::<ruta>
+        String thumb = _safeStr(
+            m['thumbnail_base64'] ?? m['thumb_b64'] ?? m['preview_b64']);
+        if (thumb.isEmpty) {
+          try {
+            final fotos = await local.listarFotos(e.dir);
+            if (fotos.isNotEmpty) {
+              final path = fotos.first.path;
+              if (path.isNotEmpty) thumb = 'FILE::$path';
+            }
+          } catch (ee) {
+            debugPrint('[DASH] No pude listar fotos en ${e.dir.path}: $ee');
+          }
+        }
+
+        final id = _safeStr(m['id'] ?? m['uuid'] ?? e.dir.toString());
+
+        mapa.putIfAbsent(
+            keyProyecto,
+                () => ProyectoResumen(
+                id: keyProyecto,
+                nombre: nombreProyecto[keyProyecto] ??
+                    (pid.isEmpty ? 'Sin proyecto' : 'Proyecto sin nombre'),
+                local: [],
+                nube: []));
+        final pr = mapa[keyProyecto]!;
+        if (pr.local.length < maxItemsPorOrigen) {
+          pr.local.add(ObsResumen(
+              id: id,
+              titulo: titulo,
+              nombreCientifico: sci,
+              fecha: ts,
+              thumb: thumb.isEmpty ? null : thumb,
+              origen: 'local'));
+        }
+        if (nombreProyecto[keyProyecto] != null) {
+          mapa[keyProyecto] = ProyectoResumen(
+              id: pr.id,
+              nombre: nombreProyecto[keyProyecto]!,
+              local: pr.local,
+              nube: pr.nube);
+        }
+        contOk++;
+      }
+      debugPrint('[DASH] Local: OK=$contOk, descartadas=$contDescartadas');
+    } catch (e) {
+      debugPrint('[DASH] Error leyendo locales: $e');
+    }
+  } else {
+    debugPrint('[DASH] Local: omitido en Web.');
+  }
+
+  // 2) Nube (borradores)
+  try {
+    final uid = fb.FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null) {
+      debugPrint(
+          '[DASH] Cloud: uid=$uid — consultando borradores por uid_usuario');
+
+      final col = FirebaseFirestore.instance.collection('observaciones');
+
+      // Consulta SIMPLE (sin orderBy, así no requiere índice extra):
+      final snap = await col
+          .where('uid_usuario', isEqualTo: uid)
+          .where('estado', isEqualTo: 'borrador')
+          .limit(200)
+          .get();
+
+      debugPrint('[DASH] Cloud: docs=${snap.docs.length}');
+
+      int cloudOk = 0;
+      int cloudDesc = 0;
+
+      for (final d in snap.docs) {
+        final data = d.data();
+
+        // rol de contexto (si está guardado en la nube)
+        final ctxRolDoc = _safeStr(data['ctx_rol'] ?? data['ctxRol']);
+        if (ctxRolCodigo != null &&
+            ctxRolDoc.isNotEmpty &&
+            ctxRolDoc != ctxRolCodigo) {
+          cloudDesc++;
+          continue;
+        }
+
+        // Proyecto (puede venir vacío o no venir)
+        final pid = _safeStr(
+            data['id_proyecto'] ?? data['proyecto_id'] ?? data['project_id']);
+        final keyProyecto = pid.isEmpty ? '__SIN_PROYECTO__' : pid;
+
+        final pname = _safeStr(data['proyecto_nombre'] ??
+            data['proyecto'] ??
+            data['project_name'] ??
+            data['nombre_proyecto']);
+        if (pname.isNotEmpty) {
+          nombreProyecto[keyProyecto] = pname;
+        } else if (pid.isEmpty) {
+          nombreProyecto['__SIN_PROYECTO__'] = 'Sin proyecto';
+        }
+
+        // ===== título preferido (científico > común > 'Sin título')
+        String? sci;
+        for (final k in const [
+          'especie_nombre_cientifico',
+          'nombre_cientifico',
+          'taxon_nombre_cientifico',
+          'scientific_name'
+        ]) {
+          final s = _safeStr(data[k]);
+          if (s.isNotEmpty) {
+            sci = s;
+            break;
+          }
+        }
+        String? common;
+        for (final k in const [
+          'especie_nombre_comun',
+          'nombre_comun',
+          'common_name'
+        ]) {
+          final s = _safeStr(data[k]);
+          if (s.isNotEmpty) {
+            common = s;
+            break;
+          }
+        }
+        final titulo = (sci ??
+            common ??
+            _safeStr(data['titulo'] ?? data['title'] ?? 'Sin título'));
+
+        // ===== timestamp (updated/created)
+        DateTime? ts;
+        final rawTs = (data['updatedAt'] ??
+            data['updated_at'] ??
+            data['createdAt'] ??
+            data['created_at']);
+        if (rawTs is Timestamp) {
+          ts = rawTs.toDate();
+        } else {
+          final s = _safeStr(rawTs);
+          if (s.isNotEmpty) ts = DateTime.tryParse(s);
+        }
+
+        // ===== thumbnail: cover_url o primera de media_urls
+        String thumb = '';
+        String urlDirecta = _safeStr(
+            data['cover_url'] ?? data['thumbnail_url'] ?? data['thumb_url']);
+        if (urlDirecta.isEmpty) {
+          final firstFromList = _firstHttpFromList(data['media_urls']);
+          if (firstFromList != null) urlDirecta = firstFromList;
+        }
+        if (urlDirecta.isNotEmpty) thumb = 'URL::$urlDirecta';
+
+        // ===== armar mapa por proyecto
+        mapa.putIfAbsent(
+          keyProyecto,
+              () => ProyectoResumen(
+            id: keyProyecto,
+            nombre: nombreProyecto[keyProyecto] ??
+                (pid.isEmpty ? 'Sin proyecto' : 'Proyecto sin nombre'),
+            local: [],
+            nube: [],
+          ),
+        );
+
+        final pr = mapa[keyProyecto]!;
+        if (pr.nube.length < maxItemsPorOrigen) {
+          pr.nube.add(ObsResumen(
+            id: d.id,
+            titulo: titulo.isEmpty ? 'Sin título' : titulo,
+            nombreCientifico: sci,
+            fecha: ts,
+            thumb: thumb.isEmpty ? null : thumb,
+            origen: 'nube',
+          ));
+        }
+        if (nombreProyecto[keyProyecto] != null) {
+          mapa[keyProyecto] = ProyectoResumen(
+            id: pr.id,
+            nombre: nombreProyecto[keyProyecto]!,
+            local: pr.local,
+            nube: pr.nube,
+          );
+        }
+
+        cloudOk++;
+        debugPrint(
+            '[DASH][CLOUD] ${d.id} -> pid="$keyProyecto" title="$titulo" thumb=${thumb.isEmpty ? "NONE" : "URL"}');
+      }
+
+      debugPrint('[DASH] Cloud: OK=$cloudOk, descartadas=$cloudDesc');
+    } else {
+      debugPrint('[DASH] Cloud: uid nulo, omitiendo consulta.');
+    }
+  } catch (e) {
+    debugPrint('[DASH] Error leyendo nube (borradores): $e');
+  }
+
+  // 3) Resolver nombres faltantes desde /proyectos
+  if (fetchProyectoNombre != null) {
+    for (final id in mapa.keys) {
+      // No intentes resolver "__SIN_PROYECTO__"
+      if (id == '__SIN_PROYECTO__') continue;
+
+      if ((nombreProyecto[id] ?? '').isEmpty) {
+        final resolved = await fetchProyectoNombre(id);
+        if (resolved != null && resolved.isNotEmpty) {
+          nombreProyecto[id] = resolved;
+          final pr = mapa[id]!;
+          mapa[id] = ProyectoResumen(
+              id: pr.id, nombre: resolved, local: pr.local, nube: pr.nube);
+          debugPrint('[DASH] Resuelto nombre proyecto $id => $resolved');
+        }
+      }
+    }
+  }
+
+  // Orden y límite
+  final list = mapa.values.toList()
+    ..sort((a, b) => b.totalBorradores.compareTo(a.totalBorradores));
+  final limited = list.take(maxProjects).toList();
+
+  // Asegurar nombre final
+  for (int i = 0; i < limited.length; i++) {
+    final pr = limited[i];
+    final name = nombreProyecto[pr.id] ?? pr.nombre;
+    limited[i] = ProyectoResumen(
+      id: pr.id,
+      nombre: name.isNotEmpty
+          ? name
+          : (pr.id == '__SIN_PROYECTO__'
+          ? 'Sin proyecto'
+          : 'Proyecto sin nombre'),
+      local: pr.local,
+      nube: pr.nube,
+    );
+  }
+
+  debugPrint('[DASH] Proyectos armados: ${limited.length}');
+  for (final p in limited) {
+    debugPrint(
+        '[DASH] Proyecto "${p.nombre}" (id=${p.id}) -> local=${p.local.length}, nube=${p.nube.length}');
+  }
+
+  return limited;
+}
+
+class _ProyectosResumenCard extends StatefulWidget {
+  final Future<String?> Function(String id) fetchProyectoNombre;
+  final String? ctxRolCodigo;
+  const _ProyectosResumenCard({
+    required this.fetchProyectoNombre,
+    this.ctxRolCodigo,
+  });
+  @override
+  State<_ProyectosResumenCard> createState() => _ProyectosResumenCardState();
+}
+
+class _ProyectosResumenCardState extends State<_ProyectosResumenCard> {
+  late Future<List<ProyectoResumen>> _future;
+
+  @override
+  void initState() {
+    super.initState();
+    _future = cargarProyectosConBorradores(
+      fetchProyectoNombre: widget.fetchProyectoNombre,
+      ctxRolCodigo: widget.ctxRolCodigo,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _ProyectosResumenCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.ctxRolCodigo != widget.ctxRolCodigo) {
+      setState(() {
+        _future = cargarProyectosConBorradores(
+          fetchProyectoNombre: widget.fetchProyectoNombre,
+          ctxRolCodigo: widget.ctxRolCodigo,
+        );
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return FutureBuilder<List<ProyectoResumen>>(
+      future: _future,
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: cs.surface,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: cs.outline.withOpacity(.16)),
+            ),
+            child: const _LoadingRow(text: 'Cargando proyectos…'),
+          );
+        }
+        final proyectos = snap.data ?? const <ProyectoResumen>[];
+        if (proyectos.isEmpty) {
+          return Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: cs.surface,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: cs.outline.withOpacity(.16)),
+            ),
+            child: const Text(
+              'No hay borradores locales o en la nube por proyecto.',
+              style: TextStyle(color: Colors.black54),
+            ),
+          );
+        }
+
+        return Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: cs.outline.withOpacity(.16)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Encabezado con botón de actualizar a la derecha
+              Row(
+                children: [
+                  const Icon(Icons.folder_special_outlined),
+                  const SizedBox(width: 8),
+                  const Expanded(
+                    child: Text(
+                      'Proyectos y observaciones (borradores)',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: () => setState(() {
+                      _future = cargarProyectosConBorradores(
+                        fetchProyectoNombre: widget.fetchProyectoNombre,
+                        ctxRolCodigo: widget.ctxRolCodigo,
+                      );
+                    }),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Actualizar'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              ...proyectos.map((p) => _ProyectoItem(proyecto: p)).toList(),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _ProyectoItem extends StatelessWidget {
+  final ProyectoResumen proyecto;
+  const _ProyectoItem({required this.proyecto});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: cs.outline.withOpacity(.14)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Encabezado del proyecto (solo nombre + ícono)
+            Row(
+              children: [
+                const Icon(Icons.folder_outlined),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    proyecto.nombre,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            _SubListadoObservaciones(titulo: 'Local', items: proyecto.local),
+            const SizedBox(height: 6),
+            _SubListadoObservaciones(titulo: 'Nube', items: proyecto.nube),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SubListadoObservaciones extends StatelessWidget {
+  final String titulo;
+  final List<ObsResumen> items;
+  const _SubListadoObservaciones({required this.titulo, required this.items});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Icon(titulo == 'Local' ? Icons.phone_android : Icons.cloud_outlined,
+              size: 16),
+          const SizedBox(width: 6),
+          Text(titulo, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            decoration: BoxDecoration(
+              color: cs.surfaceVariant.withOpacity(.5),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child:
+            Text('${items.length}', style: const TextStyle(fontSize: 12)),
+          ),
+        ]),
+        const SizedBox(height: 6),
+        if (items.isEmpty)
+          const Text('Sin borradores', style: TextStyle(color: Colors.black54))
+        else
+          SizedBox(
+            height: 92,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: items.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 10),
+              itemBuilder: (context, i) => _ObsChipCard(item: items[i]),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _ObsChipCard extends StatelessWidget {
+  final ObsResumen item;
+  const _ObsChipCard({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    Widget thumb = _thumbPlaceholder(cs);
+
+    if (item.thumb != null && item.thumb!.isNotEmpty) {
+      final mark = item.thumb!;
+      if (mark.startsWith('URL::')) {
+        final url = mark.substring(5);
+        thumb = Image.network(url, width: 56, height: 56, fit: BoxFit.cover);
+      } else if (mark.startsWith('FILE::')) {
+        final path = mark.substring(6);
+        if (!kIsWeb) {
+          thumb =
+              Image.file(File(path), width: 56, height: 56, fit: BoxFit.cover);
+        } else {
+          thumb = _thumbPlaceholder(cs); // en Web no hay File
+        }
+      } else {
+        try {
+          final bytes = base64Decode(mark);
+          thumb = Image.memory(bytes, width: 56, height: 56, fit: BoxFit.cover);
+        } catch (e) {
+          debugPrint('[DASH] thumb base64 inválido: $e');
+        }
+      }
+    }
+
+    final fechaTxt = item.fecha != null ? _fmtFull(item.fecha!) : '—';
+    final etiqueta = item.origen == 'local' ? 'Local' : 'Nube';
+
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 300, minWidth: 220),
+      child: Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: cs.outline.withOpacity(.14)),
+        ),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: SizedBox(width: 56, height: 56, child: thumb),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // 👇 título ya viene con científico/común priorizado
+                  Text(item.titulo,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 2),
+                  if (item.nombreCientifico != null)
+                    Text(item.nombreCientifico!,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 12,
+                            fontStyle: FontStyle.italic,
+                            color: Colors.black87)),
+                  const SizedBox(height: 4),
+                  Row(children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: item.origen == 'local'
+                            ? Colors.orange.withOpacity(.22)
+                            : cs.primaryContainer.withOpacity(.5),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child:
+                      Text(etiqueta, style: const TextStyle(fontSize: 11)),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(fechaTxt,
+                        style: const TextStyle(
+                            fontSize: 11, color: Colors.black54)),
+                  ]),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _thumbPlaceholder(ColorScheme cs) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: cs.surfaceVariant.withOpacity(.6),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: const Center(
+          child: Icon(Icons.photo, size: 20, color: Colors.black54)),
+    );
+  }
+}
+
+class _LoadingRow extends StatelessWidget {
+  final String text;
+  const _LoadingRow({required this.text});
+  @override
+  Widget build(BuildContext context) {
+    return Row(children: [
+      const SizedBox(
+          width: 20,
+          height: 20,
+          child: CircularProgressIndicator(strokeWidth: 2)),
+      const SizedBox(width: 10),
+      Text(text),
+    ]);
+  }
+}
+
+// ===== utils =====
+bool _isRecent(DateTime? d, {Duration maxAge = kVentanaBorradoresRecientes}) {
+  if (d == null) return false;
+  final now = DateTime.now();
+  return now.difference(d).abs() <= maxAge;
+}
+
+String _fmtFull(DateTime d) {
+  String t(int n) => n.toString().padLeft(2, '0');
+  return '${d.year}-${t(d.month)}-${t(d.day)} ${t(d.hour)}:${t(d.minute)}';
 }

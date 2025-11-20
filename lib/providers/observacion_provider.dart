@@ -1,27 +1,115 @@
-// lib/providers/observacion_provider.dart
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-
 import 'package:faunadmin2/models/observacion.dart';
 import 'package:faunadmin2/providers/auth_provider.dart';
 import 'package:faunadmin2/services/firestore_service.dart';
 import 'package:faunadmin2/utils/app_error.dart';
 import 'package:faunadmin2/services/permisos_service.dart';
-
-// Notificaciones y resolución de destinatarios
-import 'package:faunadmin2/models/notificacion.dart';
 import 'package:faunadmin2/services/notificacion_service.dart';
 import 'package:faunadmin2/services/proyecto_service.dart';
-import 'package:faunadmin2/utils/notificaciones_constants.dart'; // 👈 tipos/niveles
+import 'package:faunadmin2/utils/notificaciones_constants.dart';
 
-/// Orquestador de Observaciones
+/// ====== MÍNIMOS PARA ENVIAR A REVISIÓN (única fuente de verdad) ======
+class MinimosObs {
+  /// Devuelve lista de faltantes legibles según tu política actual:
+  /// - ≥1 foto
+  /// - fecha/hora de captura (fecha_captura o fechaHoraCaptura)
+  /// - tipo_lugar
+  /// - lugar o municipio
+  /// - lat & lng
+  /// - condicion (si es 'rastro', requiere rastro_tipo o rastro_detalle)
+  static List<String> validar(Map<String, dynamic> raw) {
+    final List<String> faltan = [];
+
+    bool _has(dynamic v) =>
+        v != null &&
+            !(v is String && v.trim().isEmpty) &&
+            !(v is Iterable && v.isEmpty) &&
+            !(v is Map && v.isEmpty);
+
+    // Fotos (al menos 1)
+    final media = raw['media'];
+    final mediaCount = (raw['media_count'] is num)
+        ? (raw['media_count'] as num).toInt()
+        : (media is List ? media.length : 0);
+    if (mediaCount < 1) faltan.add('Al menos 1 fotografía');
+
+    // Fecha/hora de captura
+    final tieneFecha =
+        _has(raw['fecha_captura']) || _has(raw['fechaHoraCaptura']);
+    if (!tieneFecha) faltan.add('Fecha/hora de captura');
+
+    // Tipo de lugar
+    if (!_has(raw['tipo_lugar'])) faltan.add('Tipo de lugar');
+
+    // Lugar o municipio
+    final tieneLugar = _has(raw['lugar']) || _has(raw['municipio']);
+    if (!tieneLugar) faltan.add('Lugar o municipio');
+
+    // Coordenadas
+    if (!_has(raw['lat']) || !_has(raw['lng'])) faltan.add('Coordenadas');
+
+    // Condición
+    final condicion = (raw['condicion'] ?? '').toString().trim().toLowerCase();
+    if (condicion.isEmpty) {
+      faltan.add('Condición del animal');
+    } else if (condicion == 'rastro') {
+      final tieneDetalleRastro =
+          _has(raw['rastro_tipo']) || _has(raw['rastro_detalle']);
+      if (!tieneDetalleRastro) faltan.add('Detalle de rastro');
+    }
+
+    return faltan;
+  }
+
+  static bool cumple(Map<String, dynamic> raw) => validar(raw).isEmpty;
+}
+
+/// ====== CANONIZACIÓN DE NOMBRE CIENTÍFICO ======
+class CanonCientifico {
+  static String? _cap(String? s) {
+    if (s == null) return null;
+    final t = s.trim();
+    if (t.isEmpty) return null;
+    return t[0].toUpperCase() + t.substring(1).toLowerCase();
+  }
+
+  static String? _low(String? s) {
+    if (s == null) return null;
+    final t = s.trim();
+    if (t.isEmpty) return null;
+    return t.toLowerCase();
+  }
+
+  /// Normaliza: "Género epíteto..." / "Género sp."
+  static String? canonizar(String? raw) {
+    if (raw == null) return null;
+    final parts =
+    raw.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+    if (parts.isEmpty) return null;
+
+    final genero = _cap(parts.first);
+    if (parts.length == 1) {
+      return genero; // solo género
+    }
+
+    if (parts.length == 2 && parts[1].toLowerCase() == 'sp.') {
+      return '$genero sp.';
+    }
+
+    final resto = parts.skip(1).map(_low).whereType<String>().join(' ');
+    return '$genero $resto';
+  }
+}
+
+/// ======== Orquestador de Observaciones ========
 class ObservacionProvider with ChangeNotifier {
   final FirestoreService _fs;
   final AuthProvider _auth;
   ObservacionProvider(this._fs, this._auth);
 
-  // ============== Estado básico UI ==============
+  // ====== Estado local UI ======
   final List<Observacion> _observaciones = [];
   bool _isLoading = false;
   String? _lastMessage;
@@ -60,10 +148,10 @@ class ObservacionProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  // ============== Stream management ==============
+  // ====== Stream management ======
   StreamSubscription<List<Observacion>>? _sub;
-  String? _currentProyectoId; // null => sin proyecto
-  String? _currentEstado;     // null => todos
+  String? _currentProyectoId;
+  String? _currentEstado;
 
   Future<void> _bind(Stream<List<Observacion>> stream) async {
     await stop();
@@ -84,7 +172,8 @@ class ObservacionProvider with ChangeNotifier {
     String? estado,
     int limit = 100,
   }) async {
-    _currentProyectoId = (proyectoId?.trim().isEmpty ?? true) ? null : proyectoId;
+    _currentProyectoId =
+    (proyectoId?.trim().isEmpty ?? true) ? null : proyectoId;
     _currentEstado = (estado?.trim().isEmpty ?? true) ? null : estado;
 
     final s = _fs.streamObservacionesByProyecto(
@@ -112,6 +201,7 @@ class ObservacionProvider with ChangeNotifier {
 
     final permisos = PermisosService(_auth);
 
+    // 1) Admin único → ve todo
     if (permisos.isAdminUnico) {
       final s = _fs.streamObservacionesByScope(
         scope: ObsScope.all,
@@ -122,6 +212,24 @@ class ObservacionProvider with ChangeNotifier {
       return;
     }
 
+    // 2) Recolector sin proyecto → solo sus propias observaciones
+    //    (obs con y sin proyecto, pero filtradas por uid)
+    final sel = _auth.selectedRolProyecto;
+    final sinProyectoEnContexto =
+        sel == null || sel.idProyecto == null || sel.idProyecto!.trim().isEmpty;
+
+    if (permisos.isRecolector && sinProyectoEnContexto) {
+      final s = _fs.streamObservacionesByScope(
+        scope: ObsScope.own,
+        estado: _currentEstado,
+        uid: uid,
+        limit: limit,
+      );
+      await _bind(s);
+      return;
+    }
+
+    // 3) Moderadores (supervisor / dueño) → por proyectos moderables
     final moderables = await _fs.projectIdsModerablesPor(uid);
     if (moderables.isNotEmpty) {
       final s = _fs.streamObservacionesByScope(
@@ -135,6 +243,7 @@ class ObservacionProvider with ChangeNotifier {
       return;
     }
 
+    // 4) Resto de usuarios → solo las suyas
     final s = _fs.streamObservacionesByScope(
       scope: ObsScope.own,
       estado: _currentEstado,
@@ -162,47 +271,6 @@ class ObservacionProvider with ChangeNotifier {
     await _bind(s);
   }
 
-  Future<void> watchProyectosModerables({
-    required List<String> projectIds,
-    String? estado,
-    bool includeSinProyecto = false,
-    int limit = 200,
-  }) async {
-    _currentProyectoId = null;
-    _currentEstado = (estado?.trim().isEmpty ?? true) ? null : estado;
-
-    final s = _fs.streamObservacionesByScope(
-      scope: ObsScope.byProjects,
-      estado: _currentEstado,
-      projectIds: projectIds,
-      includeSinProyecto: includeSinProyecto,
-      limit: limit,
-    );
-    await _bind(s);
-  }
-
-  Future<void> setEstadoFiltro(String? estado) async {
-    _currentEstado = (estado?.trim().isEmpty ?? true) ? null : estado;
-
-    if (_currentProyectoId != null) {
-      await watchProyecto(proyectoId: _currentProyectoId, estado: _currentEstado);
-    } else {
-      await watchAuto(estado: _currentEstado);
-    }
-  }
-
-  Future<void> refresh() async {
-    if (_sub == null) {
-      await watchAuto(estado: _currentEstado);
-      return;
-    }
-    if (_currentProyectoId != null) {
-      await watchProyecto(proyectoId: _currentProyectoId, estado: _currentEstado);
-    } else {
-      await watchAuto(estado: _currentEstado);
-    }
-  }
-
   Future<void> stop({bool clear = false}) async {
     await _sub?.cancel();
     _sub = null;
@@ -218,17 +286,16 @@ class ObservacionProvider with ChangeNotifier {
     super.dispose();
   }
 
-  // ============== Creación ==============
+  // ====== Creación ======
   Future<String?> crearEnProyecto({
     required String proyectoId,
     required Observacion data,
     bool toast = true,
   }) async {
     try {
-      // Asegura uid_usuario
       final uid = _auth.uid ?? '';
-      final needsUid = (data.uidUsuario == null || data.uidUsuario!.trim().isEmpty);
-      final Observacion safeData = needsUid ? data.copyWith(uidUsuario: uid) : data;
+      final needsUid = (data.uidUsuario.trim().isEmpty);
+      final safeData = needsUid ? data.copyWith(uidUsuario: uid) : data;
 
       final id = await _fs.createObservacion(
         auth: _auth,
@@ -236,16 +303,19 @@ class ObservacionProvider with ChangeNotifier {
         data: safeData,
       );
 
-      if (id == null || id.trim().isEmpty) {
-        throw Exception('createObservacion devolvió null/empty (proyectoId=$proyectoId)');
+      if (id.trim().isEmpty) {
+        throw Exception('createObservacion devolvió null/empty');
       }
 
       if (toast) _setMessage('Observación creada');
+      debugPrint('[OBS_PROV] crearEnProyecto($proyectoId) -> id=$id');
+
       return id;
-    } catch (e) {
+    } catch (e, st) {
       _setError(e);
-      debugPrint('crearEnProyecto error: $e');
-      return null;
+      debugPrint('[OBS_PROV] ERROR crearEnProyecto: $e\n$st');
+      // dejamos que el error suba para que la UI vea el motivo real
+      rethrow;
     }
   }
 
@@ -254,10 +324,9 @@ class ObservacionProvider with ChangeNotifier {
     bool toast = true,
   }) async {
     try {
-      // Asegura uid_usuario
       final uid = _auth.uid ?? '';
-      final needsUid = (data.uidUsuario == null || data.uidUsuario!.trim().isEmpty);
-      final Observacion safeData = needsUid ? data.copyWith(uidUsuario: uid) : data;
+      final needsUid = (data.uidUsuario.trim().isEmpty);
+      final safeData = needsUid ? data.copyWith(uidUsuario: uid) : data;
 
       final id = await _fs.createObservacionSinProyecto(
         auth: _auth,
@@ -269,15 +338,17 @@ class ObservacionProvider with ChangeNotifier {
       }
 
       if (toast) _setMessage('Observación creada (sin proyecto)');
+      debugPrint('[OBS_PROV] crearSinProyecto -> id=$id');
+
       return id;
-    } catch (e) {
+    } catch (e, st) {
       _setError(e);
-      debugPrint('crearSinProyecto error: $e');
-      return null;
+      debugPrint('[OBS_PROV] ERROR crearSinProyecto: $e\n$st');
+      // igual, dejamos que el error suba
+      rethrow;
     }
   }
 
-  // ============== Patch / Update ==============
   Future<bool> patch({
     required String observacionId,
     required Map<String, dynamic> patch,
@@ -285,13 +356,44 @@ class ObservacionProvider with ChangeNotifier {
   }) async {
     try {
       final data = Map<String, dynamic>.from(patch);
-      data.updateAll((k, v) => v == null ? FieldValue.delete() : v);
 
+      // === Canonización de nombre científico ===
+      // Acepta todas las variantes que usamos en UI/Remoto:
+      // - nombre_cientifico / nombreCientifico
+      // - especie_nombre_cientifico / especieNombreCientifico
+      for (final key in [
+        'nombre_cientifico',
+        'nombreCientifico',
+        'especie_nombre_cientifico',
+        'especieNombreCientifico',
+      ]) {
+        if (data.containsKey(key) && data[key] is String) {
+          final canon = CanonCientifico.canonizar(data[key] as String?);
+          if (canon == null || canon.trim().isEmpty) {
+            // si viene vacío, elimina esa(s) clave(s)
+            data.remove(key);
+          } else {
+            // Persistimos ambas familias en snake_case, por compatibilidad:
+            // - nombre_cientifico (si tu UI legada la usa)
+            // - especie_nombre_cientifico (la que estamos usando ahora)
+            data['nombre_cientifico'] = canon;
+            data['especie_nombre_cientifico'] = canon;
+
+            // limpiamos las variantes camelCase si llegaron
+            data.remove('nombreCientifico');
+            data.remove('especieNombreCientifico');
+          }
+        }
+      }
+      // === Limpieza: null => DELETE (mantén FieldValue tal cual)
+      data.updateAll((k, v) => v == null ? FieldValue.delete() : v);
+      // debugPrint('[patch $observacionId] keys=${data.keys.toList()}');
       await _fs.patchObservacion(
         auth: _auth,
         observacionId: observacionId,
         patch: data,
       );
+
       if (toast) _setMessage('Cambios guardados');
       return true;
     } catch (e) {
@@ -300,9 +402,23 @@ class ObservacionProvider with ChangeNotifier {
     }
   }
 
-  // ============== Cambios de estado + Notificaciones ==============
+  // ====== Cambios de estado (UNIFICADOS) ======
 
-  Future<bool> enviarAPendiente(String observacionId, {bool toast = true}) async {
+  Future<bool> enviarAPendiente(String observacionId,
+      {bool toast = true}) async =>
+      _enviarRevisionCore(
+        observacionId: observacionId,
+        estadoDestino: EstadosObs.pendiente,
+        toast: toast,
+        tituloNoti: 'Observación enviada a revisión',
+        mensajeNoti: 'Observación',
+        metaExtra: null,
+      );
+
+  /// 🔁 Reenviar observación RECHAZADA a revisión (usa revisar_nuevo)
+  Future<bool> reenviarRevision(String observacionId,
+      {bool toast = true}) async {
+    // Valida estado y autor, luego usa el core con estado revisar_nuevo
     try {
       final obsDoc = await FirebaseFirestore.instance
           .collection('observaciones')
@@ -310,67 +426,179 @@ class ObservacionProvider with ChangeNotifier {
           .get();
 
       if (!obsDoc.exists || obsDoc.data() == null) {
-        _setError(AppError.unknown('No existe la observación'));
+        _setError('No existe la observación');
         return false;
       }
-      final raw = obsDoc.data()!;
-      final proyectoId = _readString(raw, ['id_proyecto', 'idProyecto', 'proyectoId']);
-      final autorUid   = _readString(raw, ['uid_usuario', 'uidUsuario', 'autorUid']);
 
-      // Cualquiera puede enviar su observación a pendiente, pero si no eres autor, requerimos permisos de moderador.
-      final permisos = PermisosService(_auth);
-      final soyAutor = autorUid == _auth.uid;
-      if (!soyAutor) {
-        final esAdmin = _auth.isAdmin || permisos.isAdminUnico;
-        final same = (proyectoId != null &&
-            _auth.selectedRolProyecto?.idProyecto == proyectoId);
-        final supervisorODueno = same &&
-            (permisos.isSupervisorEnContexto || permisos.isDuenoEnContexto);
-        if (!(esAdmin || supervisorODueno)) {
-          _setError('Sin permiso para enviar a revisión');
-          return false;
-        }
+      final raw = obsDoc.data()!;
+      final estadoActual = (raw['estado'] ?? '').toString();
+      if (estadoActual != EstadosObs.rechazado) {
+        _setError('Solo las observaciones rechazadas pueden reenviarse');
+        return false;
       }
 
+      final autorUid = _readString(raw, ['uid_usuario', 'uidUsuario']);
+      if (autorUid != _auth.uid) {
+        _setError('Solo el autor puede reenviar su observación');
+        return false;
+      }
+    } catch (e) {
+      _setError(e);
+      return false;
+    }
+
+    return _enviarRevisionCore(
+      observacionId: observacionId,
+      estadoDestino: EstadosObs.revisarNuevo,
+      toast: toast,
+      tituloNoti: 'Observación reenviada a revisión',
+      mensajeNoti: 'Observación',
+      metaExtra: {'reenvio': true},
+    );
+  }
+
+  Future<bool> aprobar(String id, {bool toast = true}) =>
+      _cambiarEstadoNotificando(
+          id, EstadosObs.aprobado, 'aprobada', toast ? 'Aprobada' : null);
+
+  Future<bool> rechazar(String id,
+      {required String motivo, bool toast = true}) async {
+    // Marca telemetría antes del cambio de estado
+    try {
+      await _fs.patchObservacion(
+        auth: _auth,
+        observacionId: id,
+        patch: {
+          'was_rejected': true,
+          'rejectionReason': motivo,
+          'updatedAt': FieldValue.serverTimestamp(),
+          'updatedBy': _auth.uid,
+        },
+      );
+    } catch (_) {}
+    return _cambiarEstadoNotificando(
+      id,
+      EstadosObs.rechazado,
+      'rechazada',
+      toast ? 'Rechazada' : null,
+      rejectionReason: motivo,
+    );
+  }
+
+  Future<bool> archivar(String id, {bool toast = true}) =>
+      _cambiarEstadoNotificando(
+          id, EstadosObs.archivado, 'archivada', toast ? 'Archivada' : null);
+
+  Future<bool> revertirABorrador(String id, {bool toast = true}) =>
+      _cambiarEstadoNotificando(
+          id, EstadosObs.borrador, 'borrador', toast ? 'Borrador' : null);
+
+  Future<bool> _cambiarEstadoNotificando(
+      String id,
+      String nuevoEstado,
+      String accion,
+      String? toastOk, {
+        String? rejectionReason,
+      }) async {
+    try {
       await _fs.changeEstadoObservacion(
         auth: _auth,
-        observacionId: observacionId,
-        nuevoEstado: EstadosObs.pendiente,
-        rejectionReason: null,
+        observacionId: id,
+        nuevoEstado: nuevoEstado,
+        rejectionReason: rejectionReason,
       );
+      if (toastOk != null) _setMessage('Observación $toastOk');
+      return true;
+    } catch (e) {
+      _setError(e);
+      return false;
+    }
+  }
+
+  /// ----- Núcleo unificado para enviar/re-enviar a revisión -----
+  Future<bool> _enviarRevisionCore({
+    required String observacionId,
+    required String estadoDestino, // EstadosObs.pendiente o EstadosObs.revisarNuevo
+    bool toast = true,
+    required String tituloNoti,
+    required String mensajeNoti,
+    Map<String, dynamic>? metaExtra,
+  }) async {
+    try {
+      final docRef =
+      FirebaseFirestore.instance.collection('observaciones').doc(observacionId);
+      final snap = await docRef.get();
+      if (!snap.exists || snap.data() == null) {
+        _setError('No existe la observación');
+        return false;
+      }
+      final raw = snap.data()!;
+      final autorUid = _readString(raw, ['uid_usuario', 'uidUsuario']);
+      final proyectoId = _readString(raw, ['id_proyecto', 'idProyecto']);
+
+      // Permisos básicos: autor o admin
+      final soyAutor = autorUid == _auth.uid;
+      if (!soyAutor && !_auth.isAdmin) {
+        _setError('Sin permiso para enviar a revisión');
+        return false;
+      }
+
+      // Telemetría de rondas
+      final int roundPrev =
+      (raw['review_round'] is num) ? (raw['review_round'] as num).toInt() : 0;
+      final bool fueRechazada = (raw['estado'] ?? '') == EstadosObs.rechazado;
+
+      final now = FieldValue.serverTimestamp();
+
+      // Patch de envío/reenvío
+      final patch = <String, dynamic>{
+        'estado': estadoDestino,
+        'rejectionReason': null,
+        'was_rejected': fueRechazada,
+        'lastSubmittedAt': now,
+        'firstSubmittedAt': raw['firstSubmittedAt'] ?? now,
+        'review_round': fueRechazada
+            ? (roundPrev <= 0 ? 2 : (roundPrev + 1))
+            : (roundPrev <= 0 ? 1 : roundPrev),
+        'updatedAt': now,
+        'updatedBy': _auth.uid,
+        'submittedAt': now,
+        'submittedBy': _auth.uid,
+      };
+
+      await _fs.patchObservacion(
+        auth: _auth,
+        observacionId: observacionId,
+        patch: patch,
+      );
+
       if (toast) _setMessage('Enviada a revisión');
 
-      // Notificar a dueños/supervisores del proyecto (esquema nuevo)
+      // Notificaciones
       if (proyectoId != null && proyectoId.isNotEmpty) {
         final recipients = await ProyectoService().resolveRecipients(
           proyectoId: proyectoId,
           includeDueno: true,
           includeSupervisores: true,
-          includeColaboradores: false,
         );
-
-        if (recipients.isNotEmpty) {
-          final notif = NotificacionService();
-          await Future.wait(recipients.map((uid) {
-            if (uid == autorUid) return Future.value();
-            return notif.push(
-              uid: uid,
-              proyectoId: proyectoId,
-              obsId: observacionId,
-              tipo: NotiTipo.obsAsignadaRevision,
-              nivel: NotiNivel.info,
-              titulo: 'Observación enviada a revisión',
-              mensaje: 'Observación ${_shortId(observacionId)} enviada a revisión',
-              meta: {
-                'proyectoId': proyectoId,
-                'estado': EstadosObs.pendiente,
-                'autorUid': autorUid,
-              },
-            );
-          }));
+        for (final uid in recipients) {
+          if (uid == autorUid) continue;
+          await NotificacionService().push(
+            uid: uid,
+            proyectoId: proyectoId,
+            obsId: observacionId,
+            tipo: NotiTipo.obsAsignadaRevision,
+            nivel: NotiNivel.info,
+            titulo: tituloNoti,
+            mensaje: '$mensajeNoti ${_shortId(observacionId)}',
+            meta: {
+              'estado': estadoDestino,
+              'autorUid': autorUid,
+              if (metaExtra != null) ...metaExtra,
+            },
+          );
         }
       }
-
       return true;
     } catch (e) {
       _setError(e);
@@ -378,171 +606,59 @@ class ObservacionProvider with ChangeNotifier {
     }
   }
 
-  Future<bool> aprobar(String observacionId, {bool toast = true}) async {
-    return _cambiarEstadoNotificando(
-      observacionId: observacionId,
-      nuevoEstado: EstadosObs.aprobado,
-      accionNotif: 'aprobada',
-      toastOk: toast ? 'Observación aprobada' : null,
-      // precheck
-      requireModerationPerms: true,
-    );
+  // ====== UTILIDADES PÚBLICAS PARA SYNC/UI ======
+
+  /// Valida mínimos a partir de un map crudo del doc
+  List<String> validarMinimosRaw(Map<String, dynamic> raw) =>
+      MinimosObs.validar(raw);
+
+  /// Valida mínimos por ID (lee Firestore)
+  Future<List<String>> validarMinimosPorId(String observacionId) async {
+    final snap = await FirebaseFirestore.instance
+        .collection('observaciones')
+        .doc(observacionId)
+        .get();
+    if (!snap.exists || snap.data() == null) {
+      return ['Observación no encontrada'];
+    }
+    return MinimosObs.validar(snap.data()!);
   }
 
-  Future<bool> rechazar(
-      String observacionId, {
-        required String motivo,
-        bool toast = true,
-      }) async {
-    return _cambiarEstadoNotificando(
-      observacionId: observacionId,
-      nuevoEstado: EstadosObs.rechazado,
-      accionNotif: 'rechazada',
-      toastOk: toast ? 'Observación rechazada' : null,
-      rejectionReason: motivo,
-      extraBuilder: (base) => {...base, 'motivo': motivo},
-      // precheck
-      requireModerationPerms: true,
-    );
+  /// Borradores del usuario listos para revisión (cumplen mínimos)
+  Future<List<DocumentSnapshot<Map<String, dynamic>>>>
+  queryBorradoresListosParaRevision(String uid) async {
+    final col = FirebaseFirestore.instance.collection('observaciones');
+    final q = await col
+        .where('uid_usuario', isEqualTo: uid)
+        .where('estado', isEqualTo: EstadosObs.borrador)
+        .limit(200)
+        .get();
+
+    return q.docs.where((d) => MinimosObs.cumple(d.data())).toList();
   }
 
-  Future<bool> archivar(String observacionId, {bool toast = true}) async {
-    return _cambiarEstadoNotificando(
-      observacionId: observacionId,
-      nuevoEstado: EstadosObs.archivado,
-      accionNotif: 'archivada',
-      toastOk: toast ? 'Observación archivada' : null,
-      // precheck
-      requireModerationPerms: true,
-    );
-  }
-
-  Future<bool> revertirABorrador(String observacionId, {bool toast = true}) async {
-    return _cambiarEstadoNotificando(
-      observacionId: observacionId,
-      nuevoEstado: EstadosObs.borrador,
-      accionNotif: 'borrador',
-      toastOk: toast ? 'Devuelta a borrador' : null,
-      // precheck: permitir al autor devolver a borrador; si no es autor, requiere moderación
-      requireModerationPermsIfNotAuthor: true,
-    );
-  }
-
-  /// Cambia estado, y notifica al AUTOR (excepto cuando se envía a 'pendiente').
-  Future<bool> _cambiarEstadoNotificando({
-    required String observacionId,
-    required String nuevoEstado,
-    required String accionNotif,
-    String? rejectionReason,
-    String? toastOk,
-    Map<String, dynamic> Function(Map<String, dynamic> base)? extraBuilder,
-    bool requireModerationPerms = false,
-    bool requireModerationPermsIfNotAuthor = false,
-  }) async {
+  /// Intenta pasar a 'pendiente' si cumple mínimos; si no, queda en 'borrador'
+  Future<bool> intentarEnviarAPendienteSiCumple(String observacionId) async {
     try {
-      // Leer datos mínimos para notificar y validar permisos
-      final obsDoc = await FirebaseFirestore.instance
+      final snap = await FirebaseFirestore.instance
           .collection('observaciones')
           .doc(observacionId)
           .get();
+      if (!snap.exists || snap.data() == null) return false;
 
-      if (!obsDoc.exists || obsDoc.data() == null) {
-        _setError(AppError.unknown('No existe la observación'));
-        return false;
+      final raw = snap.data()!;
+      final faltan = MinimosObs.validar(raw);
+      if (faltan.isEmpty) {
+        return await enviarAPendiente(observacionId, toast: false);
       }
-      final raw = obsDoc.data()!;
-      final proyectoId = _readString(raw, ['id_proyecto', 'idProyecto', 'proyectoId']);
-      final autorUid   = _readString(raw, ['uid_usuario', 'uidUsuario', 'autorUid']);
-
-      // ===== PRE-CHECK DE PERMISOS (UI) =====
-      final permisos = PermisosService(_auth);
-      final esAdmin = _auth.isAdmin || permisos.isAdminUnico;
-      final soyAutor = autorUid == _auth.uid;
-
-      bool requiere = requireModerationPerms ||
-          (requireModerationPermsIfNotAuthor && !soyAutor);
-
-      if (requiere) {
-        // Supervisor o Dueño en el MISMO proyecto y que no sea el autor.
-        final same = (proyectoId != null &&
-            _auth.selectedRolProyecto?.idProyecto == proyectoId);
-        final supervisorODueno =
-            same && (permisos.isSupervisorEnContexto || permisos.isDuenoEnContexto);
-
-        final allowed = esAdmin || (supervisorODueno && !soyAutor);
-        if (!allowed) {
-          _setError('Sin permiso para moderar esta observación');
-          return false;
-        }
-      }
-
-      // ===== Cambio real (server-side vuelve a validar) =====
-      await _fs.changeEstadoObservacion(
-        auth: _auth,
-        observacionId: observacionId,
-        nuevoEstado: nuevoEstado,
-        rejectionReason: rejectionReason,
-      );
-      if (toastOk != null) _setMessage(toastOk);
-
-      // Notificar al autor (esquema nuevo)
-      if ((autorUid ?? '').isNotEmpty) {
-        final baseMeta = {
-          'proyectoId': proyectoId,
-          'estado': nuevoEstado,
-        };
-        final meta = extraBuilder != null ? extraBuilder(baseMeta) : baseMeta;
-
-        final m = _mapNotifForAccion(accionNotif);
-
-        await NotificacionService().push(
-          uid: autorUid!,
-          proyectoId: proyectoId,
-          obsId: observacionId,
-          tipo: m.tipo,      // NotiTipo.*
-          nivel: m.nivel,    // NotiNivel.*
-          titulo: m.titulo,
-          mensaje: _mensajePorAccion(accionNotif, _shortId(observacionId)),
-          meta: meta,
-        );
-      }
-
-      return true;
+      return false;
     } catch (e) {
       _setError(e);
       return false;
     }
   }
 
-  // ============== IA (sugerencias) ==============
-  Future<bool> aplicarSugerenciaIA({
-    required String observacionId,
-    required Map<String, dynamic> suggestion,
-    bool toast = true,
-  }) async {
-    try {
-      await _fs.applyAiSuggestion(
-        auth: _auth,
-        observacionId: observacionId,
-        suggestion: suggestion,
-      );
-      if (toast) _setMessage('Sugerencia aplicada');
-      return true;
-    } catch (e) {
-      _setError(e);
-      return false;
-    }
-  }
-
-  // ============== KPIs ==============
-  Future<int> contarEnProyecto(String proyectoId) =>
-      _fs.countObservacionesProyecto(proyectoId);
-
-  Future<int> contarSinProyecto() => _fs.countObservacionesSinProyecto();
-
-  // ============== Helpers locales ==============
-
-  /// Lee la primera clave no nula/ no vacía de la lista dada.
+  // ====== Helpers ======
   String? _readString(Map<String, dynamic> m, List<String> keys) {
     for (final k in keys) {
       final v = m[k];
@@ -551,74 +667,5 @@ class ObservacionProvider with ChangeNotifier {
     return null;
   }
 
-  String _mensajePorAccion(String accion, String shortId) {
-    switch (accion) {
-      case 'aprobada':
-        return 'Tu observación $shortId fue aprobada ✅';
-      case 'rechazada':
-        return 'Tu observación $shortId fue rechazada ❌';
-      case 'archivada':
-        return 'Tu observación $shortId fue archivada';
-      case 'borrador':
-        return 'Tu observación $shortId volvió a borrador';
-      case 'enviada_revision':
-        return 'Observación $shortId enviada a revisión';
-      default:
-        return 'Actualización en observación $shortId';
-    }
-  }
-
   String _shortId(String id) => id.length <= 6 ? id : id.substring(0, 6);
 }
-
-/// ====== Helper para mapear acciones → (tipo, nivel, título) ======
-class _NotifMap {
-  final String tipo;
-  final String nivel;
-  final String titulo;
-  const _NotifMap(this.tipo, this.nivel, this.titulo);
-}
-
-_NotifMap _mapNotifForAccion(String accion) {
-  switch (accion) {
-    case 'aprobada':
-      return _NotifMap(
-        NotiTipo.obsAprobada,
-        NotiNivel.success,
-        'Observación aprobada',
-      );
-    case 'rechazada':
-      return _NotifMap(
-        NotiTipo.obsRechazada,
-        NotiNivel.error,
-        'Observación rechazada',
-      );
-    case 'archivada':
-    // Si prefieres un tipo dedicado, agrega NotiTipo.obsArchivada
-      return _NotifMap(
-        NotiTipo.obsEditada,
-        NotiNivel.info,
-        'Observación archivada',
-      );
-    case 'borrador':
-    // Si prefieres un tipo dedicado, agrega NotiTipo.obsDevueltaBorrador
-      return _NotifMap(
-        NotiTipo.obsEditada,
-        NotiNivel.info,
-        'Devuelta a borrador',
-      );
-    case 'enviada_revision':
-      return _NotifMap(
-        NotiTipo.obsAsignadaRevision,
-        NotiNivel.info,
-        'Observación enviada a revisión',
-      );
-    default:
-      return _NotifMap(
-        NotiTipo.obsEditada,
-        NotiNivel.info,
-        'Actualización de observación',
-      );
-  }
-}
-

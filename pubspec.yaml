@@ -38,19 +38,19 @@ dependencies:
   http: ^1.4.0
   provider: ^6.0.5
 
-  firebase_core: ^3.0.0
-  firebase_auth: ^5.0.0
-  cloud_firestore: ^5.0.0
+  firebase_core: ^4.2.0
+  firebase_auth: ^6.1.1
+  cloud_firestore: ^6.0.3
   emailjs: ^4.0.0
   diacritic: ^0.1.6
   image_picker: ^1.2.0
   geolocator: ^14.0.2
   exif: ^3.3.0
   path_provider: ^2.1.5
-  firebase_storage: ^12.3.4
+  firebase_storage: ^13.0.3
   crypto: ^3.0.3
-  tflite_flutter: ^0.10.4
-  geocoding: ^2.2.2
+  tflite_flutter: ^0.11.0
+  geocoding: ^4.0.0
   shared_preferences: ^2.3.5
   image: ^4.1.7
   collection: ^1.18.0
@@ -59,6 +59,19 @@ dependencies:
   internet_connection_checker: ^1.0.0+1
   uuid: ^4.4.0
   cached_network_image: ^3.3.1
+  intl: ^0.20.2
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
+  url_launcher: ^6.3.1
+  flutter_typeahead: ^5.2.0
+
+
+dependency_overrides:
+  flutter_keyboard_visibility: ^6.0.0
+
+
+
+
 
 
 

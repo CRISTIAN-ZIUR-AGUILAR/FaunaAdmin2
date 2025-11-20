@@ -14,10 +14,10 @@ import 'package:faunadmin2/models/photo_media.dart';
 // IMPORTANTE: utilidades de claves de categoría
 import 'package:faunadmin2/utils/categorias_utils.dart' as cats;
 
-// NUEVO: constantes y helpers (RoleIds, urpDocId, etc.)
+//  constantes y helpers (RoleIds, urpDocId, etc.)
 import 'package:faunadmin2/utils/constants.dart';
 
-// NUEVO: errores con código para la UI
+// errores con código para la UI
 import 'package:faunadmin2/utils/app_error.dart';
 
 // ===== Alcance de visibilidad para listados =====
@@ -69,7 +69,6 @@ class FirestoreService {
     }
   }
 
-  // ========= NUEVO: helper para checar si existe una URP exacta =========
   Future<bool> _existsUrp({
     required String idProyecto,
     required String uidUsuario,
@@ -649,9 +648,9 @@ class FirestoreService {
     return Proyecto.fromMap(doc.data()!, doc.id);
   }
 
-  // =======================
-  //      OBSERVACIONES
-  // =======================
+// =======================
+//      OBSERVACIONES
+// =======================
 
   Query<Map<String, dynamic>> _obsBaseQuery({String? proyectoId}) {
     final col = _db.collection('observaciones');
@@ -661,11 +660,126 @@ class FirestoreService {
     return col.where('id_proyecto', isEqualTo: proyectoId);
   }
 
+  /// --- Helpers para nombres legibles (autor, proyecto, categoría) ---
+  Future<String?> _getUsuarioNombre(String uid) async {
+    if (uid.isEmpty) return null;
+    final snap = await _db.collection('usuarios').doc(uid).get();
+    final nombre = (snap.data()?['nombre_completo'] as String?)?.trim();
+    if (nombre != null && nombre.isNotEmpty) return nombre;
+    return (snap.data()?['correo'] as String?)?.trim();
+  }
+
+  Future<String?> _getProyectoNombre(String proyectoId) async {
+    if (proyectoId.isEmpty) return null;
+    final snap = await _db.collection('proyectos').doc(proyectoId).get();
+    return (snap.data()?['nombre'] as String?)?.trim();
+  }
+
+  /// Lee id_categoria del proyecto (si existe) y lo devuelve como int?
+  Future<int?> _getIdCategoriaFromProyecto(String proyectoId) async {
+    if (proyectoId.isEmpty) return null;
+    final p = await _db.collection('proyectos').doc(proyectoId).get();
+    final v = p.data()?['id_categoria'];
+    if (v is num) return v.toInt();
+    return null;
+  }
+
+  /// Busca el nombre de categoría.
+  /// - Si hay `proyectoId`, intenta primero en `proyectos/{id}/categorias`.
+  /// - Si no hay o no existe, cae al catálogo global `categorias`.
+  Future<String?> _getCategoriaNombre({
+    required String? proyectoId,
+    required int? idCategoria,
+  }) async {
+    if (idCategoria == null) return null;
+
+    if (proyectoId != null && proyectoId.isNotEmpty) {
+      final cs = await _db
+          .collection('proyectos')
+          .doc(proyectoId)
+          .collection('categorias')
+          .doc(idCategoria.toString())
+          .get();
+      final n = (cs.data()?['nombre'] as String?)?.trim();
+      if (n != null && n.isNotEmpty) return n;
+    }
+
+    final cg = await _db.collection('categorias').doc(idCategoria.toString()).get();
+    return (cg.data()?['nombre'] as String?)?.trim();
+  }
+
+  /// --- Helpers para denormalizar datos desde un media ---
+  Map<String, int> _partsFromDate(dynamic ts) {
+    // ts puede ser Timestamp (Firebase) o DateTime o null
+    DateTime d;
+    if (ts == null) {
+      d = DateTime.now();
+    } else if (ts is Timestamp) {
+      d = ts.toDate();
+    } else if (ts is DateTime) {
+      d = ts;
+    } else {
+      d = DateTime.now();
+    }
+    return {
+      'year': d.year,
+      'month': d.month,
+      'day': d.day,
+      'hour': d.hour,
+      'minute': d.minute,
+    };
+  }
+
+  /// Copia en la observación los campos clave de una foto para usarla como portada
+  Future<void> _applyPrimaryFromMedia({
+    required String observacionId,
+    required String mediaId,
+    required Map<String, dynamic> mediaMap,
+    String? uidUpdater,
+  }) async {
+    final captured = mediaMap['captured_at'] ?? mediaMap['createdAt'] ?? FieldValue.serverTimestamp();
+    final parts = _partsFromDate(mediaMap['captured_at'] ?? mediaMap['createdAt']);
+
+    // origen del media
+    final lat = mediaMap['gps_lat'];
+    final lng = mediaMap['gps_lng'];
+    final alt = mediaMap['altitude'];
+    final device = mediaMap['camera_model'];
+
+    final thumb = mediaMap['thumbnail_path'];
+    final path  = mediaMap['storage_path'];
+    final photoId = mediaMap['photo_id'] ?? mediaMap['original_file_id'] ?? mediaId;
+
+    final now = FieldValue.serverTimestamp();
+
+    await _db.collection('observaciones').doc(observacionId).set({
+      'primary_media_id'     : mediaId,
+      'primary_storage_path' : path,
+      'primary_photo_id'     : photoId,
+      if (thumb != null) 'thumbnail_path': thumb,
+
+      'fecha_captura'        : captured,
+
+      // ✅ Alineado con el modelo/UI:
+      if (lat != null) 'lat': lat,
+      if (lng != null) 'lng': lng,
+      if (alt != null) 'altitud': alt,
+
+      // (opcional) compat con nombres antiguos si ya existen dashboards/consultas
+      if (lat != null) 'gps_lat': lat,
+      if (lng != null) 'gps_lng': lng,
+      if (alt != null) 'gps_alt_m': alt,
+
+      if (device != null) 'device_model': device,
+      ...parts, // year, month, day, hour, minute
+
+      'updatedAt'            : now,
+      if (uidUpdater != null) 'updatedBy': uidUpdater,
+      'ultima_modificacion'  : now,
+    }, SetOptions(merge: true));
+  }
+
   /// ======== Preflight de media para "Enviar a revisión" ========
-  /// Lee observaciones/{id}/media y resume hallazgos críticos/avisos.
-  /// Devuelve un mapa con:
-  /// { total:int, hasManipulated:bool, hasNotAnimal:bool, hasSuspect:bool,
-  ///   hasNoMetadata:bool, hasStockLike:bool, warningFlags: List<String> }
   Future<Map<String, dynamic>> _preflightMedia(String observacionId) async {
     final col = _db
         .collection('observaciones')
@@ -736,8 +850,31 @@ class FirestoreService {
     };
   }
 
-  /// Stream por proyecto (o sin proyecto si `proyectoId == null`),
-  /// opcionalmente filtrado por estado canónico.
+  /// ---------- Gates y helpers de seguridad ----------
+
+  bool _canSeeObs({
+    required String currentUid,
+    required String? autor,
+    required String? proyectoId,
+    required PermisosService permisos,
+  }) {
+    // Autor siempre puede ver su propia observación
+    if (autor != null && autor == currentUid) return true;
+
+    // Admin único siempre puede
+    if (permisos.isAdminUnico) return true;
+
+    // Si tiene proyecto, aplica visibilidad de proyecto
+    if (proyectoId != null && proyectoId.isNotEmpty) {
+      return permisos.canViewProject(proyectoId);
+    }
+
+    // Sin proyecto: solo autor o admin (autor ya cubierto arriba)
+    return false;
+  }
+
+  /// ---------- Streams ----------
+
   Stream<List<Observacion>> streamObservacionesByProyecto({
     required String? proyectoId, // null = sin proyecto
     String? estado, // null = todos
@@ -745,7 +882,7 @@ class FirestoreService {
   }) {
     Query<Map<String, dynamic>> q = _obsBaseQuery(proyectoId: proyectoId)
         .withEstado(estado)
-    // Orden principal por fecha de captura (desc) + última modificación para desempatar
+    // Orden por fecha de captura (desc) + última modificación
         .orderBy('fecha_captura', descending: true)
         .orderBy('ultima_modificacion', descending: true)
         .limit(limit);
@@ -755,15 +892,10 @@ class FirestoreService {
     );
   }
 
-  /// Stream de observaciones por alcance:
-  /// - ObsScope.all        → Admin único: todas
-  /// - ObsScope.byProjects → Owner/Supervisor: de sus proyectos (y opcional “sin proyecto”)
-  /// - ObsScope.own        → Colaborador/Recolector: propias
-  ///
-  /// Maneja whereIn > 10 con chunking y fusiona streams de forma reactiva.
+  /// Stream por alcance (admin/all, por proyectos, propias)
   Stream<List<Observacion>> streamObservacionesByScope({
     required ObsScope scope,
-    String? estado,               // 'borrador'|'pendiente'|'aprobado'|'rechazado'|'archivado'|null
+    String? estado,               // 'borrador'|'pendiente'|'revisar_nuevo'|'aprobado'|'rechazado'|'archivado'|null
     String? uid,                  // requerido si scope==own
     List<String>? projectIds,     // requerido si scope==byProjects
     bool includeSinProyecto = false,
@@ -891,14 +1023,34 @@ class FirestoreService {
 
     final now = FieldValue.serverTimestamp();
 
+    // 🔹 Denormalizar nombres legibles
+    final autorNombre = await _getUsuarioNombre(uid);
+    final proyectoNombre = await _getProyectoNombre(proyectoId);
+
+    // 🔹 Resolver categoría: si la trae la Observación úsala, si no herédala del Proyecto
+    final int? idCategoria =
+    (data.idCategoria != null) ? data.idCategoria : await _getIdCategoriaFromProyecto(proyectoId);
+
+    final categoriaNombre = await _getCategoriaNombre(
+      proyectoId: proyectoId,
+      idCategoria: idCategoria,
+    );
+
     final payload = {
       ...data.toMap(),
       'id_proyecto': proyectoId,
+      if (idCategoria != null) 'id_categoria': idCategoria,
       'createdAt': now,
       'createdBy': uid,
       'updatedAt': now,
       'updatedBy': uid,
       'ultima_modificacion': now,
+
+      // 👀 Legibles para UI
+      'autor_nombre': autorNombre,
+      'proyecto_nombre': proyectoNombre,
+      if (categoriaNombre != null) 'categoria_nombre': categoriaNombre,
+
       // IA (defaults)
       'ai_status': data.aiStatus ?? 'idle',
       'ai_top_suggestions': data.aiTopSuggestions?.map((e) => e.toMap()).toList() ?? [],
@@ -929,28 +1081,42 @@ class FirestoreService {
     }
 
     final now = FieldValue.serverTimestamp();
+
+    // 🔹 Denormalizar nombres legibles
+    final autorNombre = await _getUsuarioNombre(uid);
+
+    // Para sin proyecto: id_categoria puede venir desde la UI (opcional)
+    final categoriaNombre = await _getCategoriaNombre(
+      proyectoId: null,
+      idCategoria: data.idCategoria,
+    );
+
     final payload = {
       ...data.toMap(),
       'id_proyecto': null,
+      if (data.idCategoria != null) 'id_categoria': data.idCategoria,
+      if (categoriaNombre != null) 'categoria_nombre': categoriaNombre,
       'createdAt': now,
       'createdBy': uid,
       'updatedAt': now,
       'updatedBy': uid,
       'ultima_modificacion': now,
+
+      // 👀 Legibles para UI
+      'autor_nombre': autorNombre,
+
+      // IA (defaults)
       'ai_status': data.aiStatus ?? 'idle',
       'ai_top_suggestions': data.aiTopSuggestions?.map((e) => e.toMap()).toList() ?? [],
       'ai_model': data.aiModel,
       'ai_error': null,
     };
+
     final doc = await _db.collection('observaciones').add(payload);
     return doc.id;
   }
 
-  /// Patch de campos para una observación (el AUTOR puede editar cuando
-  /// estado ∈ {borrador, rechazado}.
-  ///
-  /// Importante: el `patch` ya viene con `FieldValue.delete()` mapeado desde
-  /// el Provider cuando un valor es `null`. Aquí **no** volvemos a filtrar.
+  /// Patch de campos para una observación (autor edita en {borrador, rechazado})
   Future<void> patchObservacion({
     required AuthProvider auth,
     required String observacionId,
@@ -969,13 +1135,16 @@ class FirestoreService {
 
     final m = snap.data()!;
     final String? proyectoId = m['id_proyecto'] as String?;
-    final String estado = (m['estado'] ?? '') as String;
-    final String? autor = m['uid_usuario'] as String?;
+    final String estado      = (m['estado'] ?? '') as String;
+    final String? autor      = m['uid_usuario'] as String?;
 
     final permisos = PermisosService(auth);
-    final puedeVer = (proyectoId == null)
-        ? (uid == autor || permisos.isAdminUnico) // sin proyecto: autor o admin
-        : permisos.canViewProject(proyectoId);
+    final puedeVer = _canSeeObs(
+      currentUid: uid,
+      autor: autor,
+      proyectoId: proyectoId,
+      permisos: permisos,
+    );
     if (!puedeVer) {
       throw AppError(code: 'obs_forbidden', message: 'Sin acceso.');
     }
@@ -986,21 +1155,241 @@ class FirestoreService {
       throw AppError(code: 'obs_not_editable', message: 'No editable en este estado.');
     }
 
+    // ===== Helpers locales de normalización =====
+    bool _has(dynamic v) =>
+        v != null &&
+            !(v is String && v.trim().isEmpty) &&
+            !(v is Iterable && v.isEmpty) &&
+            !(v is Map && v.isEmpty);
+
+    int? _toInt(dynamic v) {
+      if (v == null) return null;
+      if (v is num) return v.toInt();
+      if (v is String) {
+        final s = v.trim();
+        return s.isEmpty ? null : int.tryParse(s);
+      }
+      return null;
+    }
+
+    double? _toDouble(dynamic v) {
+      if (v == null) return null;
+      if (v is num) return v.toDouble();
+      if (v is String) {
+        final s = v.trim().replaceAll(',', '.');
+        return s.isEmpty ? null : double.tryParse(s);
+      }
+      return null;
+    }
+
+    String? _trimOrNull(dynamic v) {
+      if (v == null) return null;
+      final s = v.toString().trim();
+      return s.isEmpty ? null : s;
+    }
+
+    String? _canonCientifico(String? raw) {
+      if (raw == null) return null;
+      final parts = raw.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+      if (parts.isEmpty) return null;
+      String cap(String x) => x.isEmpty ? x : (x[0].toUpperCase() + x.substring(1).toLowerCase());
+      String low(String x) => x.toLowerCase();
+
+      final genero = cap(parts.first);
+      if (parts.length == 1) return genero;
+      if (parts.length == 2 && parts[1].toLowerCase() == 'sp.') return '$genero sp.';
+      final resto = parts.skip(1).map(low).join(' ');
+      return '$genero $resto';
+    }
+
+    Map<String, dynamic> _normalizeAliases(Map<String, dynamic> src) {
+      final data = Map<String, dynamic>.from(src);
+
+      // --- edad / edad_ejemplar → edad_aproximada (int o delete)
+      if (data.containsKey('edad_aproximada') ||
+          data.containsKey('edad') ||
+          data.containsKey('edad_ejemplar')) {
+        final v = data['edad_aproximada'] ?? data['edad'] ?? data['edad_ejemplar'];
+        final parsed = _toInt(v);
+        data['edad_aproximada'] = (parsed == null) ? FieldValue.delete() : parsed;
+        data.remove('edad');
+        data.remove('edad_ejemplar');
+      }
+
+      // --- tipo_lugar → lugar_tipo
+      if (data.containsKey('tipo_lugar')) {
+        final v = _trimOrNull(data['tipo_lugar']);
+        data['lugar_tipo'] = v ?? FieldValue.delete();
+        data.remove('tipo_lugar');
+      }
+
+      // --- lugar → lugar_nombre
+      if (data.containsKey('lugar')) {
+        final v = _trimOrNull(data['lugar']);
+        data['lugar_nombre'] = v ?? FieldValue.delete();
+        data.remove('lugar');
+      }
+
+      // --- condicion → condicion_animal (lower)
+      if (data.containsKey('condicion')) {
+        final v = _trimOrNull(data['condicion'])?.toLowerCase();
+        data['condicion_animal'] = v ?? FieldValue.delete();
+        data.remove('condicion');
+      }
+
+      // --- gps_* → lat/lng/altitud
+      if (data.containsKey('gps_lat')) {
+        final v = _toDouble(data['gps_lat']);
+        data['lat'] = (v == null) ? FieldValue.delete() : v;
+        data.remove('gps_lat');
+      }
+      if (data.containsKey('gps_lng')) {
+        final v = _toDouble(data['gps_lng']);
+        data['lng'] = (v == null) ? FieldValue.delete() : v;
+        data.remove('gps_lng');
+      }
+      if (data.containsKey('gps_alt_m')) {
+        final v = _toDouble(data['gps_alt_m']);
+        data['altitud'] = (v == null) ? FieldValue.delete() : v;
+        data.remove('gps_alt_m');
+      }
+
+      // --- nombre científico variantes → especie_nombre_cientifico
+      if (data.containsKey('nombre_cientifico') ||
+          data.containsKey('nombreCientifico') ||
+          data.containsKey('especieNombreCientifico') ||
+          data.containsKey('especie_nombre_cientifico')) {
+        final raw = data['especie_nombre_cientifico'] ??
+            data['nombre_cientifico'] ??
+            data['nombreCientifico'] ??
+            data['especieNombreCientifico'];
+        final canon = _canonCientifico(_trimOrNull(raw));
+        if (canon == null) {
+          data['especie_nombre_cientifico'] = FieldValue.delete();
+        } else {
+          data['especie_nombre_cientifico'] = canon;
+        }
+        data.remove('nombre_cientifico');
+        data.remove('nombreCientifico');
+        data.remove('especieNombreCientifico');
+      }
+
+      // --- municipio_display / estado_pais trim
+      if (data.containsKey('municipio_display')) {
+        final v = _trimOrNull(data['municipio_display']);
+        data['municipio_display'] = v ?? FieldValue.delete();
+      }
+      if (data.containsKey('estado_pais')) {
+        final v = _trimOrNull(data['estado_pais']);
+        data['estado_pais'] = v ?? FieldValue.delete();
+      }
+
+      // --- media → media_count (si llega array)
+      if (data.containsKey('media') && data['media'] is List) {
+        data['media_count'] = (data['media'] as List).length;
+        data.remove('media');
+      }
+
+      // --- Nulls explícitos → DELETE (salvo FieldValue ya seteado)
+      data.updateAll((k, v) => v == null ? FieldValue.delete() : v);
+
+      return data;
+    }
+
+    // ===== Lista blanca + prefijos permitidos =====
+    const allowedExact = <String>{
+      // captura / core
+      'fecha_captura',
+      'edad_aproximada',
+      'lugar_nombre',
+      'lugar_tipo',
+      'municipio',
+      'municipio_display',
+      'estado_pais',
+      'lat',
+      'lng',
+      'altitud',
+      'notas',
+      'condicion_animal',
+      'rastro_tipo',
+      'rastro_detalle',
+
+      // especie
+      'especie_id',
+      'especie_nombre',
+      'especie_nombre_cientifico',
+      'especie_nombre_comun',
+      'especie_slug',
+      'especie_fuera_catalogo',
+
+      // media
+      'media_urls',
+      'media_storage_paths',
+      'media_count',
+      'cover_url',
+      'primary_media_id',
+
+      // compat antiguo
+      'fotos',
+    };
+
+    // Prefijos permitidos
+    const allowedPrefixes = <String>{
+      'taxo_',   // taxo_clase, taxo_orden, taxo_familia, ...
+      'ubic_',   // ubic_estado, ubic_region, ubic_distrito, ...
+    };
+
+    bool _isAllowedKey(String k) {
+      if (allowedExact.contains(k)) return true;
+      for (final p in allowedPrefixes) {
+        if (k.startsWith(p)) return true;
+      }
+      return false;
+    }
+
+    // ✅ Normaliza aliases antes de aplicar whitelist
+    final normalized = _normalizeAliases(patch);
+
+    // Sanitiza patch según lista blanca/prefijos
+    final sanitized = <String, dynamic>{};
+    normalized.forEach((k, v) {
+      if (_isAllowedKey(k)) {
+        sanitized[k] = v;
+      }
+    });
+
+    if (sanitized.isEmpty) {
+      throw AppError(code: 'obs_invalid_patch', message: 'Sin cambios válidos para guardar.');
+    }
+
     await ref.update({
-      ...patch,
+      ...sanitized,
       'updatedAt': FieldValue.serverTimestamp(),
       'updatedBy': uid,
       'ultima_modificacion': FieldValue.serverTimestamp(),
     });
   }
 
-  /// Cambios de estado con validaciones de rol y flujo:
-  /// - Autor: borrador/rechazado → pendiente (con auditoría de envío)
-  /// - Moderador (Supervisor/Owner/Admin): pendiente → aprobado|rechazado
-  ///   * Recolector SIN proyecto: solo Admin puede moderar
-  ///   * Anti auto-aprobación (salvo Admin, marcado conflictOfInterest)
-  /// - Archivado: moderador o autor (si estaba aprobado)
-  /// - Revertir a borrador: moderador o autor (si estaba rechazado)
+
+
+// === Helpers internos para limpiar metadatos de revisión ===
+  Map<String, dynamic> _clearValidatedFields() => {
+    'validatedAt': FieldValue.delete(),
+    'validatedBy': FieldValue.delete(),
+    'validatedByRol': FieldValue.delete(),
+  };
+
+  Map<String, dynamic> _clearSubmissionFields() => {
+    'submittedAt': FieldValue.delete(),
+    'submittedBy': FieldValue.delete(),
+    'authorRoleAtSubmission': FieldValue.delete(),
+  };
+
+  Map<String, dynamic> _clearRejectionReason() => {
+    'rejectionReason': FieldValue.delete(),
+  };
+
+  /// Cambios de estado con validaciones de rol y flujo
   Future<void> changeEstadoObservacion({
     required AuthProvider auth,
     required String observacionId,
@@ -1019,22 +1408,24 @@ class FirestoreService {
     }
 
     final m = snap.data()!;
-    final String? proyectoId = m['id_proyecto'] as String?;
-    final String estadoActual = (m['estado'] ?? '') as String;
-    final String? autor = m['uid_usuario'] as String?;
+    final String? proyectoId   = m['id_proyecto'] as String?;
+    final String estadoActual  = (m['estado'] ?? '') as String;
+    final String? autor        = m['uid_usuario'] as String?;
 
     final permisos = PermisosService(auth);
-    final puedeVer = (proyectoId == null)
-        ? (uid == autor || permisos.isAdminUnico) // sin proyecto
-        : permisos.canViewProject(proyectoId);
+    final puedeVer = _canSeeObs(
+      currentUid: uid,
+      autor: autor,
+      proyectoId: proyectoId,
+      permisos: permisos,
+    );
     if (!puedeVer) {
       throw AppError(code: 'obs_forbidden', message: 'Sin acceso.');
     }
 
-    final bool esAutor = autor == uid;
-    final bool esModeradorDeProyecto =
-        (proyectoId != null) && permisos.canModerateProject(proyectoId);
-    final bool reviewerEsAdmin = permisos.isAdminUnico;
+    final bool esAutor             = autor == uid;
+    final bool esModeradorProyecto = (proyectoId != null) && permisos.canModerateProject(proyectoId);
+    final bool esAdmin             = permisos.isAdminUnico;
 
     bool ok = false;
     final upd = <String, dynamic>{
@@ -1044,109 +1435,192 @@ class FirestoreService {
       'ultima_modificacion': FieldValue.serverTimestamp(),
     };
 
-    if (nuevoEstado == EstadosObs.pendiente) {
-      // Autor puede enviar a pendiente desde borrador o rechazado (con/sin proyecto)
-      ok = esAutor &&
-          (estadoActual == EstadosObs.borrador || estadoActual == EstadosObs.rechazado);
+    // Para log
+    final fromEstado = estadoActual;
+    final toEstado   = nuevoEstado;
 
+    // Round actual (si existe)
+    final currentRound = (m['review_round'] is num) ? (m['review_round'] as num).toInt() : 0;
+
+    if (nuevoEstado == EstadosObs.pendiente) {
+      // 🔹 Envío inicial: SOLO desde borrador
+      ok = esAutor && (estadoActual == EstadosObs.borrador);
       if (!ok) {
-        throw AppError(code: 'obs_invalid_state', message: 'No se puede enviar a pendiente.');
+        throw AppError(code: 'obs_invalid_state', message: 'No se puede enviar a revisión inicial desde este estado.');
       }
-      // Validaciones mínimas para pendiente
       if (m['fecha_captura'] == null) {
         throw AppError(code: 'obs_invalid_state', message: 'Falta fecha de captura.');
       }
 
-      // ⬇️ Preflight de fotos
       final pf = await _preflightMedia(observacionId);
-
       if ((pf['total'] as int) == 0) {
         throw AppError(code: 'obs_media_missing', message: 'Debes adjuntar al menos una fotografía.');
       }
       if (pf['hasManipulated'] == true) {
-        throw AppError(
-          code: 'obs_media_manipulated',
-          message: 'Se detectaron señales de manipulación en la(s) fotografía(s).',
-        );
+        throw AppError(code: 'obs_media_manipulated', message: 'Se detectó manipulación en fotografía(s).');
       }
       if (pf['hasNotAnimal'] == true) {
-        throw AppError(
-          code: 'obs_media_not_animal',
-          message: 'Las fotografías no parecen contener un ejemplar animal reconocible.',
-        );
+        throw AppError(code: 'obs_media_not_animal', message: 'Las fotografías no contienen un animal válido.');
       }
 
       final warnings = (pf['warningFlags'] as List<String>?) ?? const <String>[];
 
-      // Rol del autor al enviar (heurística rápida)
+      // Rol del autor al enviar (heurística)
       String autorRol = 'colaborador';
       if (proyectoId == null || proyectoId.isEmpty) autorRol = 'recolector';
 
-      upd['submittedAt'] = FieldValue.serverTimestamp();
-      upd['submittedBy'] = uid;
-      upd['authorRoleAtSubmission'] = autorRol;
-      if (warnings.isNotEmpty) {
-        upd['review_warnings'] = warnings;
+      upd.addAll({
+        ..._clearValidatedFields(),
+        ..._clearRejectionReason(),
+        'submittedAt': FieldValue.serverTimestamp(),
+        'submittedBy': uid,
+        'authorRoleAtSubmission': autorRol,
+        'review_round': (currentRound <= 0) ? 1 : currentRound + 1,
+        'firstSubmittedAt': m['firstSubmittedAt'] ?? FieldValue.serverTimestamp(),
+        'lastSubmittedAt': FieldValue.serverTimestamp(),
+        'was_rejected': false,
+        if (warnings.isNotEmpty) 'review_warnings': warnings,
+      });
+
+    } else if (nuevoEstado == EstadosObs.revisarNuevo) {
+      // 🔹 Reenvío posterior a rechazo: SOLO autor desde rechazado
+      ok = esAutor && (estadoActual == EstadosObs.rechazado);
+      if (!ok) {
+        throw AppError(code: 'obs_invalid_state', message: 'Solo el autor puede reenviar una observación rechazada.');
       }
+      if (m['fecha_captura'] == null) {
+        throw AppError(code: 'obs_invalid_state', message: 'Falta fecha de captura.');
+      }
+
+      // Debe existir al menos una foto válida
+      final pf = await _preflightMedia(observacionId);
+      if ((pf['total'] as int) == 0) {
+        throw AppError(code: 'obs_media_missing', message: 'Debes adjuntar al menos una fotografía.');
+      }
+      if (pf['hasManipulated'] == true) {
+        throw AppError(code: 'obs_media_manipulated', message: 'Se detectó manipulación en fotografía(s).');
+      }
+      if (pf['hasNotAnimal'] == true) {
+        throw AppError(code: 'obs_media_not_animal', message: 'Las fotografías no contienen un animal válido.');
+      }
+
+      // 🔒 Blindaje: exigir cambios después del rechazo
+      final rejectedAt = m['validatedAt'] is Timestamp ? (m['validatedAt'] as Timestamp).toDate() : null;
+      final updatedAt  = m['updatedAt'] is Timestamp ? (m['updatedAt'] as Timestamp).toDate() : null;
+      if (rejectedAt != null && (updatedAt == null || !updatedAt.isAfter(rejectedAt))) {
+        throw AppError(code: 'obs_not_updated', message: 'Debes modificar algo antes de reenviar a revisión.');
+      }
+
+      final warnings = (pf['warningFlags'] as List<String>?) ?? const <String>[];
+      final autorRol = (m['authorRoleAtSubmission'] as String?) ??
+          ((proyectoId == null || proyectoId.isEmpty) ? 'recolector' : 'colaborador');
+
+      upd.addAll({
+        ..._clearValidatedFields(),
+        ..._clearRejectionReason(),
+        'submittedAt': FieldValue.serverTimestamp(),
+        'submittedBy': uid,
+        'authorRoleAtSubmission': autorRol,
+        'review_round': (currentRound <= 0) ? 2 : currentRound + 1,
+        'lastSubmittedAt': FieldValue.serverTimestamp(),
+        'was_rejected': true, // útil para UI/analytics
+        if (warnings.isNotEmpty) 'review_warnings': warnings,
+      });
+
     } else if (nuevoEstado == EstadosObs.aprobado || nuevoEstado == EstadosObs.rechazado) {
-      if (estadoActual != EstadosObs.pendiente) {
-        throw AppError(code: 'obs_invalid_state', message: 'Solo desde pendiente.');
+      // 🔹 Validación: desde pendiente O revisar_nuevo
+      final esRevisable = (estadoActual == EstadosObs.pendiente || estadoActual == EstadosObs.revisarNuevo);
+      if (!esRevisable) {
+        throw AppError(code: 'obs_invalid_state', message: 'Solo se puede validar desde revisión.');
       }
       if (nuevoEstado == EstadosObs.rechazado &&
           (rejectionReason == null || rejectionReason.trim().isEmpty)) {
         throw AppError(code: 'obs_invalid_state', message: 'Motivo de rechazo requerido.');
       }
 
-      final String autorRol = (m['authorRoleAtSubmission'] as String?) ??
+      // Anti auto-aprobación (salvo Admin)
+      if (esAutor && !esAdmin) {
+        throw AppError(code: 'obs_forbidden', message: 'No puedes validar tu propia observación.');
+      }
+
+      // SIN proyecto (recolector): solo Admin valida
+      final autorRol = (m['authorRoleAtSubmission'] as String?) ??
           ((proyectoId == null || proyectoId.isEmpty) ? 'recolector' : 'colaborador');
-
-      // 1) anti auto-aprobación (salvo Admin)
-      if (esAutor && !reviewerEsAdmin) {
-        throw AppError(code: 'obs_forbidden', message: 'No puedes aprobar tu propia observación.');
+      if ((proyectoId == null || proyectoId.isEmpty) && autorRol == 'recolector' && !esAdmin) {
+        throw AppError(code: 'obs_forbidden', message: 'Solo Admin puede validar observaciones sin proyecto.');
       }
 
-      // 2) SIN proyecto (recolector): solo Admin puede moderar
-      if ((proyectoId == null || proyectoId.isEmpty) &&
-          autorRol == 'recolector' &&
-          !reviewerEsAdmin) {
-        throw AppError(code: 'obs_forbidden', message: 'Solo Admin puede moderar observaciones sin proyecto.');
+      // CON proyecto: requiere moderador (o Admin)
+      if (proyectoId != null && proyectoId.isNotEmpty && !esAdmin && !esModeradorProyecto) {
+        throw AppError(code: 'obs_forbidden', message: 'Se requiere Supervisor/Owner/Admin para validar.');
       }
 
-      // 3) CON proyecto: requiere moderador del proyecto (o Admin)
-      if (proyectoId != null && proyectoId.isNotEmpty && !reviewerEsAdmin) {
-        if (!esModeradorDeProyecto) {
-          throw AppError(code: 'obs_forbidden', message: 'Se requiere Supervisor/Owner/Admin.');
-        }
-        if ((autorRol == 'supervisor' || autorRol == 'owner') && esAutor) {
-          throw AppError(code: 'obs_forbidden', message: 'Otro supervisor/owner debe aprobar.');
-        }
-      }
+      final bool coi = esAutor && esAdmin;
 
-      final bool coi = esAutor && reviewerEsAdmin;
+      upd.addAll({
+        'validatedAt': FieldValue.serverTimestamp(),
+        'validatedBy': uid,
+        'validatedByRol': esAdmin ? 'admin' : 'moderador',
+        if (nuevoEstado == EstadosObs.rechazado)
+          'rejectionReason': rejectionReason!.trim()
+        else
+          ..._clearRejectionReason(),
+        'conflictOfInterest': coi,
+      });
 
-      upd['validatedAt'] = FieldValue.serverTimestamp();
-      upd['validatedBy'] = uid;
-      upd['validatedByRol'] = reviewerEsAdmin ? 'admin' : 'moderador';
-      upd['rejectionReason'] =
-      (nuevoEstado == EstadosObs.rechazado) ? (rejectionReason ?? '') : null;
-      upd['conflictOfInterest'] = coi;
     } else if (nuevoEstado == EstadosObs.archivado) {
-      // Moderador o autor si estaba aprobado
-      ok = (reviewerEsAdmin || esModeradorDeProyecto) ||
-          (esAutor && estadoActual == EstadosObs.aprobado);
+      // Moderador/Admin o autor si estaba aprobado
+      ok = esAdmin || esModeradorProyecto || (esAutor && estadoActual == EstadosObs.aprobado);
+      if (!ok) {
+        throw AppError(code: 'obs_invalid_state', message: 'No puedes archivar esta observación.');
+      }
+
+      // Tratar archivo como acción de revisión → set validated* y limpiar motivo
+      upd.addAll({
+        'validatedAt': FieldValue.serverTimestamp(),
+        'validatedBy': uid,
+        'validatedByRol': esAdmin ? 'admin' : (esModeradorProyecto ? 'moderador' : 'autor'),
+        ..._clearRejectionReason(),
+      });
+
     } else if (nuevoEstado == EstadosObs.borrador) {
-      // Revertir: moderador o autor desde rechazado
-      ok = (reviewerEsAdmin || esModeradorDeProyecto) ||
-          (esAutor && estadoActual == EstadosObs.rechazado);
+      // Revertir a borrador: autor si venía de rechazado; o moderador/admin
+      ok = (esAutor && estadoActual == EstadosObs.rechazado) || esAdmin || esModeradorProyecto;
+      if (!ok) {
+        throw AppError(code: 'obs_invalid_state', message: 'No puedes revertir a borrador.');
+      }
+
+      upd.addAll({
+        ..._clearSubmissionFields(),
+        ..._clearValidatedFields(),
+        ..._clearRejectionReason(),
+      });
+
     } else {
       throw AppError(code: 'obs_invalid_state', message: 'Estado no permitido.');
     }
 
-    if (!ok && nuevoEstado != EstadosObs.pendiente) {
+    // Validación de seguridad para transiciones no cubiertas
+    if (nuevoEstado != EstadosObs.pendiente &&
+        nuevoEstado != EstadosObs.revisarNuevo &&
+        !(nuevoEstado == EstadosObs.aprobado || nuevoEstado == EstadosObs.rechazado) &&
+        !ok) {
       throw AppError(code: 'obs_invalid_state', message: 'Transición inválida.');
     }
 
     await ref.update(upd);
+
+    // Log de auditoría
+    final logRef = ref.collection('logs').doc();
+    await logRef.set({
+      'from': fromEstado,
+      'to': toEstado,
+      'by': uid,
+      'at': FieldValue.serverTimestamp(),
+      if (nuevoEstado == EstadosObs.rechazado) 'motivo': rejectionReason?.trim(),
+      // contexto útil
+      'round': (upd['review_round'] is int) ? upd['review_round'] : currentRound,
+    });
   }
 
   /// Aplicar sugerencia de IA (solo autor en estados editables).
@@ -1203,12 +1677,12 @@ class FirestoreService {
     return q.count ?? 0;
   }
 
-  // === NUEVO: lector puntual por id (alineado con el provider) ===
+// === Lector puntual por id (alineado con el provider) ===
   Future<DocumentSnapshot<Map<String, dynamic>>> getObservacionDoc(String id) {
     return _db.collection('observaciones').doc(id).get();
   }
 
-  // === OPCIONAL: helper rápido para extraer autor y proyecto ===
+// === Helper rápido para extraer autor y proyecto ===
   Future<Map<String, String?>> getAutorYProyectoDeObservacion(String id) async {
     final snap = await _db.collection('observaciones').doc(id).get();
     if (!snap.exists || snap.data() == null) {
@@ -1220,6 +1694,51 @@ class FirestoreService {
       'proyectoId': m['id_proyecto'] as String?,
     };
   }
+
+// FirestoreService.dart
+  Future<void> deleteObservacion({
+    required AuthProvider auth,
+    required String id,
+  }) async {
+    final ref = _db.collection('observaciones').doc(id);
+    final snap = await ref.get();
+    if (!snap.exists || snap.data() == null) {
+      throw AppError(code: 'obs_not_found', message: 'Observación no encontrada.');
+    }
+
+    final m = snap.data()!;
+    final uidAutor   = (m['uid_usuario'] as String?) ?? '';
+    final estado     = (m['estado'] as String?) ?? '';
+    final proyectoId = m['id_proyecto'] as String?;
+
+    final permisos = PermisosService(auth);
+    final can = permisos.canDeleteObsV2(
+      idProyecto: proyectoId,
+      uidAutor: uidAutor,
+      estado: estado,
+    );
+    if (!can) {
+      throw AppError(code: 'obs_forbidden', message: 'No puedes eliminar esta observación.');
+    }
+
+    // Borra subcolecciones primero (media, logs) y luego el doc
+    final mediaCol = ref.collection('media');
+    final logsCol  = ref.collection('logs');
+
+    final mediaSnap = await mediaCol.get();
+    for (final d in mediaSnap.docs) {
+      await d.reference.delete();
+    }
+
+    final logsSnap = await logsCol.get();
+    for (final d in logsSnap.docs) {
+      await d.reference.delete();
+    }
+
+    await ref.delete();
+  }
+
+
 
   // =======================
   //        PHOTO MEDIA
@@ -1246,6 +1765,7 @@ class FirestoreService {
   /// Crear un PhotoMedia bajo `observaciones/{obsId}/media`.
   /// - Rellena createdAt/createdBy si vienen nulos.
   /// - Incrementa `media_count` en el doc padre.
+  /// - Si es la PRIMERA foto → fija como portada y denormaliza datos clave en la observación.
   Future<String> addPhotoMedia({
     required AuthProvider auth,
     required String observacionId,
@@ -1269,23 +1789,38 @@ class FirestoreService {
       ...media.toMap(),
       'createdAt': media.createdAt ?? now,
       'createdBy': media.createdBy ?? uid,
+      // Compat futura: snake_case si algún día quieres ordenar por created_at
+      'created_at': media.createdAt ?? now,
     };
 
     final ref = await _mediaCol(observacionId).add(payload);
 
+    final obsRef  = _db.collection('observaciones').doc(observacionId);
+    final obsSnap = await obsRef.get();
+    final prevCnt = (obsSnap.data()?['media_count'] as num?)?.toInt() ?? 0;
+
     // Mantener contador en el padre
-    await _db.collection('observaciones').doc(observacionId).set({
+    await obsRef.set({
       'media_count': FieldValue.increment(1),
       'ultima_modificacion': now,
       'updatedAt': now,
       'updatedBy': uid,
     }, SetOptions(merge: true));
 
+    // Si es la PRIMERA foto → fija como portada y copia datos clave a la observación
+    if (prevCnt == 0) {
+      await _applyPrimaryFromMedia(
+        observacionId: observacionId,
+        mediaId: ref.id,
+        mediaMap: payload,
+        uidUpdater: uid,
+      );
+    }
+
     return ref.id;
   }
 
-  /// Actualiza campos de un media (no filtra nulls: si quieres borrar una clave,
-  /// envía FieldValue.delete() desde el caller).
+  /// Actualiza campos de un media (no filtra nulls)
   Future<void> updatePhotoMedia({
     required AuthProvider auth,
     required String observacionId,
@@ -1324,7 +1859,7 @@ class FirestoreService {
     // Borrar doc de subcolección
     await _mediaCol(observacionId).doc(mediaId).delete();
 
-    // Decrementar contador en el padre (con piso en 0 mediante recompute opcional)
+    // Decrementar contador en el padre
     await _db.collection('observaciones').doc(observacionId).set({
       'media_count': FieldValue.increment(-1),
       'ultima_modificacion': FieldValue.serverTimestamp(),
@@ -1362,12 +1897,13 @@ class FirestoreService {
       throw AppError(code: 'media_not_found', message: 'Media no encontrado.');
     }
 
-    await _db.collection('observaciones').doc(observacionId).set({
-      'primary_media_id': mediaId,
-      'updatedAt': FieldValue.serverTimestamp(),
-      'updatedBy': uid,
-      'ultima_modificacion': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    // Denormaliza a la observación con los datos del media seleccionado
+    await _applyPrimaryFromMedia(
+      observacionId: observacionId,
+      mediaId: mediaId,
+      mediaMap: mSnap.data()!,
+      uidUpdater: uid,
+    );
   }
 
   // ---------- Resumen de autenticidad/calidad a nivel observación (opcional) ----------
@@ -1398,11 +1934,7 @@ class FirestoreService {
     return va >= vb ? a : b;
   }
 
-  /// Calcula y guarda en la observación un resumen agregado:
-  /// - media_authenticity
-  /// - media_quality
-  /// - media_flags (unión)
-  /// No bloquea flujos; sólo ayuda a mostrar advertencias globales en UI.
+  /// Calcula y guarda en la observación un resumen agregado.
   Future<void> updateObservationMediaSummary(String observacionId) async {
     final items = await getPhotoMediaOnce(observacionId);
     if (items.isEmpty) {
@@ -1439,7 +1971,6 @@ class FirestoreService {
       'ultima_modificacion': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
   }
-
   // =======================
   //  USUARIO-ROL-PROYECTO
   // =======================
@@ -1685,11 +2216,8 @@ class FirestoreService {
 
   Future<void> addUsuarioRolProyecto(UsuarioRolProyecto urp) =>
       _db.collection('usuario_rol_proyecto').add(urp.toMap());
-
-  late Future<void> deleteUsuarioRolProyect;
-  o(String id) =>
+  Future<void> deleteUsuarioRolProyecto(String id) =>
       _db.collection('usuario_rol_proyecto').doc(id).delete();
-
   Future<int> eliminarRolesDeUsuario(String uidUsuario) async {
     final qs = await _db
         .collection('usuario_rol_proyecto')
@@ -1702,7 +2230,6 @@ class FirestoreService {
     await batch.commit();
     return qs.docs.length;
   }
-
   // ====== GESTIÓN COLABORADORES / RECOLECTORES POR PROYECTO ======
 
   // ---- Colaboradores ----

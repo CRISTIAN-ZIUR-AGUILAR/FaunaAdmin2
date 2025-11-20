@@ -1,424 +1,143 @@
 // lib/ui/screens/observaciones/aprobar_observacion_screen.dart
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import 'package:faunadmin2/models/observacion.dart';
+import 'package:faunadmin2/models/photo_media.dart';
 import 'package:faunadmin2/providers/auth_provider.dart';
 import 'package:faunadmin2/providers/observacion_provider.dart';
 import 'package:faunadmin2/services/permisos_service.dart';
+import 'package:faunadmin2/services/firestore_service.dart';
 
-// ✅ Notificaciones (modelo/servicio/constantes)
-import 'package:faunadmin2/models/notificacion.dart'; // (lo usas para tipos locales si hiciera falta)
+// Notificaciones
+import 'package:faunadmin2/models/notificacion.dart';
 import 'package:faunadmin2/services/notificacion_service.dart';
 import 'package:faunadmin2/utils/notificaciones_constants.dart';
-
-// ✅ NUEVO: para resolver URLs y cachear imágenes
-import 'package:firebase_storage/firebase_storage.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 
 class AprobarObservacionScreen extends StatefulWidget {
   final String observacionId;
   const AprobarObservacionScreen({super.key, required this.observacionId});
 
   @override
-  State<AprobarObservacionScreen> createState() =>
-      _AprobarObservacionScreenState();
+  State<AprobarObservacionScreen> createState() => _AprobarObservacionScreenState();
 }
 
 class _AprobarObservacionScreenState extends State<AprobarObservacionScreen> {
+  final _db = FirebaseFirestore.instance;
+  final _fs = FirestoreService();
+  final _notif = NotificacionService();
+
   final _motivoCtrl = TextEditingController();
   bool _working = false;
 
-  final _notifSvc = NotificacionService();
-
-  @override
-  void dispose() {
-    _motivoCtrl.dispose();
-    super.dispose();
+  // ===== Utils =====
+  DateTime? _ts(dynamic v) {
+    if (v == null) return null;
+    if (v is Timestamp) return v.toDate();
+    if (v is int) return DateTime.fromMillisecondsSinceEpoch(v);
+    if (v is String) return DateTime.tryParse(v);
+    return null;
   }
 
-  /// Normaliza URLs v0 de Firebase Storage cuando el bucket quedó con ".firebasestorage.app"
-  String _sanitizeFirebaseUrl(String url) {
-    if (url.contains('.firebasestorage.app')) {
-      return url.replaceFirst('.firebasestorage.app', '.appspot.com');
+  String _fmtDT(dynamic v) {
+    final d = _ts(v);
+    if (d == null) return '—';
+    String t(int n) => n.toString().padLeft(2, '0');
+    return '${d.year}-${t(d.month)}-${t(d.day)} ${t(d.hour)}:${t(d.minute)}';
+  }
+
+  String _humanBytes(dynamic v) {
+    if (v == null) return '—';
+    int n;
+    if (v is int) n = v; else if (v is String) n = int.tryParse(v) ?? 0; else return v.toString();
+    const k = 1024;
+    if (n < k) return '$n B';
+    final kb = n / k;
+    if (kb < k) return '${kb.toStringAsFixed(1)} KB';
+    final mb = kb / k;
+    if (mb < k) return '${mb.toStringAsFixed(1)} MB';
+    final gb = mb / k;
+    return '${gb.toStringAsFixed(1)} GB';
+  }
+
+  bool _isChanged(Map<String, dynamic> raw, String key) {
+    final arr = raw['changed_fields_since_reject'];
+    if (arr is List) return arr.contains(key);
+    return false;
+  }
+
+  // Calcula dif contra snapshot del rechazo y, si falta, la persiste
+  Future<Set<String>> _ensureChangedFieldsSet(String obsId, Map<String, dynamic> raw) async {
+    final changed = <String>{};
+    final snap = (raw['rejected_snapshot'] is Map<String, dynamic>)
+        ? raw['rejected_snapshot'] as Map<String, dynamic>
+        : null;
+    if (snap != null) {
+      final keys = <String>[
+        'especie_nombre_cientifico','especie_nombre_comun',
+        'taxo_clase','taxo_orden','taxo_familia',
+        'lugar_nombre','lugar_tipo','municipio','estado_pais','ubic_region','ubic_distrito',
+        'lat','lng','altitud',
+        'fecha_captura','edad_aproximada','condicion_animal','rastro_tipo','rastro_detalle','notas',
+      ];
+      for (final k in keys) {
+        final a = raw[k];
+        final b = snap[k];
+        if ((a is num || b is num) ? (a?.toString() != b?.toString()) : (a != b)) {
+          changed.add(k);
+        }
+      }
+      // si el campo no existe en doc, lo guardamos para facilitar UI posteriores
+      if (!(raw['changed_fields_since_reject'] is List)) {
+        try {
+          await context.read<ObservacionProvider>().patch(
+            observacionId: obsId,
+            patch: {'changed_fields_since_reject': changed.toList()},
+            toast: false,
+          );
+        } catch (_) {}
+      }
     }
-    return url;
+    return changed;
   }
 
-  // ====== HELPERS PARA URLS DE IMAGEN ======
-
-  /// Normaliza dominios *.firebasestorage.app → *.appspot.com
-  String _sanitizeFirebaseHost(String url) {
-    if (url.contains('.firebasestorage.app')) {
-      return url.replaceFirst('.firebasestorage.app', '.appspot.com');
-    }
-    return url;
-  }
-
-  /// Devuelve una URL descargable (https) a partir de:
-  /// - gs://bucket/path
-  /// - https://... (corrige host y bucket en el path si traen .firebasestorage.app,
-  ///   e intenta reconstruir por StorageRef si falta token/alt=media)
-  /// - rutas simples tipo "fotos/2025/L/archivo.jpg"
   Future<String> _ensureDownloadUrl(String raw) async {
     if (raw.isEmpty) return raw;
-
-    // A) gs://bucket/path → getDownloadURL()
     if (raw.startsWith('gs://')) {
       final ref = FirebaseStorage.instance.refFromURL(raw);
       return await ref.getDownloadURL();
     }
-
-    // B) http(s)://
     if (raw.startsWith('http://') || raw.startsWith('https://')) {
-      var url = raw;
-
-      // 1) Normaliza host si trae ".firebasestorage.app"
-      if (url.contains('.firebasestorage.app')) {
-        url = url.replaceFirst('.firebasestorage.app', '.appspot.com');
-      }
-
-      // 2) Si el *bucket* dentro del path también trae ".firebasestorage.app", cámbialo
-      //    Ej: .../v0/b/<bucket>.firebasestorage.app/o/... → .../v0/b/<bucket>.appspot.com/o/...
-      final bucketInPath = RegExp(r'/v0/b/([^/]+)/o/');
-      final m = bucketInPath.firstMatch(url);
-      if (m != null) {
-        final bucket = m.group(1)!;
-        if (bucket.endsWith('.firebasestorage.app')) {
-          final fixed = bucket.replaceFirst('.firebasestorage.app', '.appspot.com');
-          url = url.replaceFirst('/v0/b/$bucket/o/', '/v0/b/$fixed/o/');
-        }
-      }
-
-      // 3) Si es GCS y NO trae token ni alt=media, intenta reconstruir por Storage Ref
-      final uri = Uri.tryParse(url);
-      final isGcs = url.contains('firebasestorage.googleapis.com') || url.contains('appspot.com');
-      final hasToken = uri?.queryParameters.containsKey('token') ?? false;
-      final hasAltMedia = uri?.queryParameters['alt'] == 'media';
-
-      if (isGcs && (!hasToken && !hasAltMedia)) {
+      final url = Uri.tryParse(raw);
+      final isGcs = raw.contains('firebasestorage.googleapis.com') || raw.contains('appspot.com');
+      final hasToken = url?.queryParameters.containsKey('token') ?? false;
+      final hasAlt = url?.queryParameters['alt'] == 'media';
+      if (isGcs && !hasToken && !hasAlt) {
         try {
-          if (uri != null && uri.pathSegments.contains('o')) {
-            final oIndex = uri.pathSegments.indexOf('o');
-            if (oIndex >= 0 && oIndex + 1 < uri.pathSegments.length) {
-              final encoded = uri.pathSegments[oIndex + 1];
-              final decodedPath = Uri.decodeFull(encoded);
+          if (url != null && url.pathSegments.contains('o')) {
+            final oIdx = url.pathSegments.indexOf('o');
+            if (oIdx >= 0 && oIdx + 1 < url.pathSegments.length) {
+              final enc = url.pathSegments[oIdx + 1];
+              final decodedPath = Uri.decodeFull(enc);
               final ref = FirebaseStorage.instance.ref(decodedPath);
               return await ref.getDownloadURL();
             }
           }
-        } catch (_) {/* fallback */}
+        } catch (_) {}
       }
-
-      return url;
+      return raw;
     }
-
-    // C) RUTA SIMPLE tipo "fotos/2025/L/archivo.jpg" → getDownloadURL()
     try {
       final ref = FirebaseStorage.instance.ref(raw);
       return await ref.getDownloadURL();
     } catch (_) {
       return raw;
     }
-  }
-
-  /// Etiqueta legible para notificaciones (sin IDs)
-  String _labelObs(Observacion o) {
-    final lugar = (o.lugarNombre?.trim().isNotEmpty ?? false)
-        ? o.lugarNombre!.trim()
-        : (o.municipio?.trim().isNotEmpty ?? false)
-        ? o.municipio!.trim()
-        : 'observación';
-    final fecha = _fmtFecha(o.fechaCaptura);
-    return '$lugar · $fecha';
-  }
-
-  /// Wrapper para ejecutar una acción de provider y (si aplica) emitir notificación
-  Future<void> _runAction({
-    required Future<bool> Function() call,
-    required String okMsg,
-    Future<void> Function()? onOk,
-  }) async {
-    if (_working) return;
-    setState(() => _working = true);
-    final prov = context.read<ObservacionProvider>();
-
-    try {
-      final ok = await call();
-      if (!mounted) return;
-      setState(() => _working = false);
-
-      final msg = ok ? okMsg : (prov.lastError ?? 'No se pudo completar la acción');
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
-
-      if (ok && onOk != null) {
-        await onOk();
-      }
-
-      if (ok) Navigator.of(context).pop();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _working = false);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Error: $e')));
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final auth = context.watch<AuthProvider>();
-    final permisos = PermisosService(auth);
-
-    // Stream del doc + data cruda (para media_urls)
-    final stream = FirebaseFirestore.instance
-        .collection('observaciones')
-        .doc(widget.observacionId)
-        .snapshots();
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Revisión de observación')),
-      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-        stream: stream,
-        builder: (context, snap) {
-          if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (!snap.hasData || !snap.data!.exists || snap.data!.data() == null) {
-            return const Center(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text('No se encontró la observación.'),
-              ),
-            );
-          }
-
-          final raw = snap.data!.data()!;
-          final obs = Observacion.fromMap(raw, snap.data!.id);
-
-          // ---------- QUIÉN PUEDE APROBAR ----------
-          final selected = auth.selectedRolProyecto;
-          final sameProject = (obs.idProyecto != null &&
-              obs.idProyecto!.isNotEmpty &&
-              selected?.idProyecto == obs.idProyecto);
-
-          // Regla final:
-          // - Admin / Admin único => siempre
-          // - Supervisor o Dueño del mismo proyecto => siempre y que no sea el autor
-          // - Nunca el autor (salvo que sea admin)
-          final esAdmin = auth.isAdmin || permisos.isAdminUnico;
-          final supervisorODuenoMismoProyecto =
-              sameProject && (permisos.isSupervisorEnContexto || permisos.isDuenoEnContexto);
-          final soyAutor = obs.uidUsuario == auth.uid;
-
-          final puedeAprobar = esAdmin || (supervisorODuenoMismoProyecto && !soyAutor);
-
-          // ---------- CONTENIDO ----------
-          final content = ListView(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
-            children: [
-              _Header(obs: obs), // <- SIN IDs
-              const SizedBox(height: 10),
-              _EstadoPill(estado: obs.estado),
-              const SizedBox(height: 12),
-              _FotosSection( // <- RESUELVE gs://, host, bucket y cachea
-                mediaUrls: _mediaUrlsFromRaw(raw),
-                ensureUrl: _ensureDownloadUrl,
-              ),
-              const SizedBox(height: 16),
-              _SectionTitle('Datos generales'),
-
-              // 👉 NOMBRES REALES (no IDs)
-              _AutorRow(uid: obs.uidUsuario),
-              _ProyectoRow(proyectoId: obs.idProyecto),
-
-              _KV('Fecha de captura', _fmtFecha(obs.fechaCaptura)),
-              if ((obs.lugarTipo ?? '').trim().isNotEmpty)
-                _KV('Tipo de lugar', obs.lugarTipo!),
-              if ((obs.lugarNombre ?? '').trim().isNotEmpty)
-                _KV('Nombre del lugar', obs.lugarNombre!.trim()),
-              if ((obs.municipio ?? '').trim().isNotEmpty ||
-                  (obs.estadoPais ?? '').trim().isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: -6,
-                    children: [
-                      if ((obs.municipio ?? '').trim().isNotEmpty)
-                        _chip(Icons.location_city_outlined, obs.municipio!.trim()),
-                      if ((obs.estadoPais ?? '').trim().isNotEmpty)
-                        _chip(Icons.flag_outlined, obs.estadoPais!.trim()),
-                    ],
-                  ),
-                ),
-              const SizedBox(height: 16),
-              _SectionTitle('Ubicación'),
-              _CoordsCard(lat: obs.lat, lng: obs.lng, altitud: obs.altitud),
-              const SizedBox(height: 16),
-              _SectionTitle('Condición / Rastro'),
-              _ConditionBlock(
-                condicion: obs.condicionAnimal,
-                rastroTipo: obs.rastroTipo,
-                rastroDetalle: obs.rastroDetalle,
-              ),
-              if ((obs.especieNombre ?? '').trim().isNotEmpty) ...[
-                const SizedBox(height: 16),
-                _SectionTitle('Especie (texto libre)'),
-                Text(obs.especieNombre!.trim()),
-              ],
-              if ((obs.notas ?? '').trim().isNotEmpty) ...[
-                const SizedBox(height: 16),
-                _SectionTitle('Notas'),
-                Text(obs.notas!.trim()),
-              ],
-              const SizedBox(height: 16),
-              _SectionTitle('Medios vinculados'),
-              _KV('Cantidad', (raw['media_count'] ?? 0).toString()),
-            ],
-          );
-
-          // ---------- BARRA DE ACCIONES ----------
-          final actionsBar = _ActionsBar(
-            estado: obs.estado,
-            puedeAprobar: puedeAprobar,
-            soyAutor: soyAutor,
-            working: _working,
-            motivoCtrl: _motivoCtrl,
-
-            // APROBAR
-            onAprobar: () => _confirm(
-              title: 'Aprobar observación',
-              message: '¿Confirmas aprobar esta observación?',
-              run: () => _runAction(
-                call: () => context.read<ObservacionProvider>().aprobar(obs.id!),
-                okMsg: 'Observación aprobada',
-                onOk: () async {
-                  final uidAutor = obs.uidUsuario;
-                  if (uidAutor.isNotEmpty) {
-                    await _notifSvc.push(
-                      uid: uidAutor,
-                      proyectoId: obs.idProyecto,
-                      obsId: obs.id,
-                      tipo: NotiTipo.obsAprobada,
-                      nivel: NotiNivel.success,
-                      titulo: 'Observación aprobada',
-                      // 🔄 Sin IDs: lugar + fecha
-                      mensaje: 'Tu ${_labelObs(obs)} fue aprobada ✅',
-                      meta: {'estado': EstadosObs.aprobado},
-                    );
-                  }
-                },
-              ),
-            ),
-
-            // RECHAZAR
-            onRechazar: () async {
-              if (_motivoCtrl.text.trim().isEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Escribe el motivo de rechazo')),
-                );
-                return;
-              }
-              await _confirm(
-                title: 'Rechazar observación',
-                message: '¿Seguro que deseas rechazarla? Esta acción notifica al autor.',
-                run: () => _runAction(
-                  call: () => context
-                      .read<ObservacionProvider>()
-                      .rechazar(obs.id!, motivo: _motivoCtrl.text.trim()),
-                  okMsg: 'Observación rechazada',
-                  onOk: () async {
-                    final uidAutor = obs.uidUsuario;
-                    if (uidAutor.isNotEmpty) {
-                      await _notifSvc.push(
-                        uid: uidAutor,
-                        proyectoId: obs.idProyecto,
-                        obsId: obs.id,
-                        tipo: NotiTipo.obsRechazada,
-                        nivel: NotiNivel.error,
-                        titulo: 'Observación rechazada',
-                        // 🔄 Sin IDs
-                        mensaje: 'Tu ${_labelObs(obs)} fue rechazada ❌',
-                        meta: {
-                          'estado': EstadosObs.rechazado,
-                          'motivo': _motivoCtrl.text.trim(),
-                        },
-                      );
-                    }
-                  },
-                ),
-              );
-            },
-
-            // ARCHIVAR (solo aprobada)
-            onArchivar: () => _confirm(
-              title: 'Archivar observación',
-              message: 'Se moverá a “Archivado”. ¿Continuar?',
-              run: () => _runAction(
-                call: () => context.read<ObservacionProvider>().archivar(obs.id!),
-                okMsg: 'Observación archivada',
-                onOk: () async {
-                  final uidAutor = obs.uidUsuario;
-                  if (uidAutor.isNotEmpty) {
-                    await _notifSvc.push(
-                      uid: uidAutor,
-                      proyectoId: obs.idProyecto,
-                      obsId: obs.id,
-                      tipo: NotiTipo.obsEditada, // o crea NotiTipo.obsArchivada
-                      nivel: NotiNivel.info,
-                      titulo: 'Observación archivada',
-                      // 🔄 Sin IDs
-                      mensaje: 'Tu ${_labelObs(obs)} fue archivada',
-                      meta: {'estado': EstadosObs.archivado},
-                    );
-                  }
-                },
-              ),
-            ),
-
-            // REVERTIR A BORRADOR (rechazada/archivada)
-            onRevertir: () => _confirm(
-              title: 'Devolver a borrador',
-              message: 'La observación volverá a estado “borrador”. ¿Continuar?',
-              run: () => _runAction(
-                call: () => context.read<ObservacionProvider>().revertirABorrador(obs.id!),
-                okMsg: 'Devuelta a borrador',
-                onOk: () async {
-                  final uidAutor = obs.uidUsuario;
-                  if (uidAutor.isNotEmpty) {
-                    await _notifSvc.push(
-                      uid: uidAutor,
-                      proyectoId: obs.idProyecto,
-                      obsId: obs.id,
-                      tipo: NotiTipo.obsEditada, // o crea NotiTipo.obsDevueltaBorrador
-                      nivel: NotiNivel.info,
-                      titulo: 'Devuelta a borrador',
-                      // 🔄 Sin IDs
-                      mensaje: 'Tu ${_labelObs(obs)} volvió a borrador',
-                      meta: {'estado': EstadosObs.borrador},
-                    );
-                  }
-                },
-              ),
-            ),
-
-            // ENVIAR A REVISIÓN (autor)
-            onEnviarRevision: () => _runAction(
-              call: () => context.read<ObservacionProvider>().enviarAPendiente(obs.id!),
-              okMsg: 'Enviada a revisión',
-            ),
-          );
-
-          return Stack(
-            children: [
-              content,
-              Positioned(left: 0, right: 0, bottom: 0, child: actionsBar),
-            ],
-          );
-        },
-      ),
-    );
   }
 
   Future<void> _confirm({
@@ -440,29 +159,557 @@ class _AprobarObservacionScreenState extends State<AprobarObservacionScreen> {
     if (ok == true) await run();
   }
 
-  // Helpers
-  List<String> _mediaUrlsFromRaw(Map<String, dynamic> data) {
-    final v1 = data['media_urls'];
-    if (v1 is List) return v1.whereType<String>().toList();
-    final v2 = data['mediaUrls'];
-    if (v2 is List) return v2.whereType<String>().toList();
-    return const <String>[];
+  Future<void> _runAction({
+    required Future<bool> Function() call,
+    required String okMsg,
+    Observacion? obsForNotif,
+    Map<String, dynamic>? meta,
+    bool popOnOk = true,
+  }) async {
+    if (_working) return;
+    setState(() => _working = true);
+    final prov = context.read<ObservacionProvider>();
+
+    try {
+      final ok = await call();
+      if (!mounted) return;
+
+      setState(() => _working = false);
+      final msg = ok ? okMsg : (prov.lastError ?? 'No se pudo completar la acción');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+
+      if (ok && obsForNotif != null) {
+        final uidAutor = obsForNotif.uidUsuario ?? '';
+        if (uidAutor.isNotEmpty) {
+          await _notif.push(
+            uid: uidAutor,
+            proyectoId: obsForNotif.idProyecto,
+            obsId: obsForNotif.id,
+            tipo: (okMsg.contains('aprobada'))
+                ? NotiTipo.obsAprobada
+                : (okMsg.contains('rechazada') ? NotiTipo.obsRechazada : NotiTipo.obsEditada),
+            nivel: (okMsg.contains('rechazada'))
+                ? NotiNivel.error
+                : (okMsg.contains('aprobada') ? NotiNivel.success : NotiNivel.info),
+            titulo: okMsg,
+            mensaje: 'Tu ${_labelObs(obsForNotif)} ${okMsg.toLowerCase()}',
+            meta: meta,
+          );
+        }
+      }
+
+      if (ok && popOnOk) Navigator.of(context).pop();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _working = false);
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
   }
 
-  static String _fmtFecha(DateTime? dt) {
+  String _fmtFecha(DateTime? dt) {
     if (dt == null) return '—';
-    final y = dt.year.toString().padLeft(4, '0');
-    final m = dt.month.toString().padLeft(2, '0');
-    final d = dt.day.toString().padLeft(2, '0');
-    final h = dt.hour.toString().padLeft(2, '0');
-    final min = dt.minute.toString().padLeft(2, '0');
-    return '$y-$m-$d $h:$min';
+    String t(int n) => n.toString().padLeft(2, '0');
+    return '${dt.year}-${t(dt.month)}-${t(dt.day)} ${t(dt.hour)}:${t(dt.minute)}';
+  }
+
+  String _labelObs(Observacion o) {
+    final lugar = (o.lugarNombre?.trim().isNotEmpty ?? false)
+        ? o.lugarNombre!.trim()
+        : (o.municipio?.trim().isNotEmpty ?? false)
+        ? o.municipio!.trim()
+        : 'observación';
+    final fecha = _fmtFecha(o.fechaCaptura);
+    return '$lugar · $fecha';
+  }
+
+  @override
+  void dispose() {
+    _motivoCtrl.dispose();
+    super.dispose();
+  }
+
+  // ===== Validación de aprobación (replica reglas de “agregar”) =====
+  List<String> _issuesForApproval(Map<String, dynamic> raw, List<PhotoMedia> medias) {
+    final issues = <String>[];
+    final obs = Observacion.fromMap(raw, raw['id']!.toString());
+    if (medias.isEmpty || medias.length > 4) {
+      issues.add('Debes tener entre 1 y 4 fotos vinculadas.');
+    }
+    if (obs.fechaCaptura == null) {
+      issues.add('Falta la fecha/hora de captura.');
+    }
+    if ((obs.lugarTipo ?? '').trim().isEmpty) {
+      issues.add('Falta el tipo de lugar.');
+    }
+    final lugarOk = ((obs.lugarNombre ?? '').trim().isNotEmpty) || ((obs.municipio ?? '').trim().isNotEmpty);
+    if (!lugarOk) {
+      issues.add('Escribe el nombre del lugar o el municipio.');
+    }
+    if (obs.lat == null || obs.lng == null) {
+      issues.add('Incluye coordenadas (latitud y longitud).');
+    }
+    const validas = {EstadosAnimal.vivo, EstadosAnimal.muerto, EstadosAnimal.rastro};
+    if (!validas.contains(obs.condicionAnimal)) {
+    issues.add('Condición del animal inválida.');
+    }
+    if (obs.condicionAnimal == EstadosAnimal.rastro) {
+    final hasTipo = (obs.rastroTipo ?? '').trim().isNotEmpty;
+    final hasDetalle = (obs.rastroDetalle ?? '').trim().isNotEmpty;
+    if (!hasTipo && !hasDetalle) {
+    issues.add('Para “Rastro”, indica tipo o detalle.');
+    }
+    }
+    return issues;
+  }
+
+  Future<List<PhotoMedia>> _fetchMediaOnce() async {
+    final qs = await _db
+        .collection('observaciones')
+        .doc(widget.observacionId)
+        .collection('media')
+        .get();
+    return qs.docs.map((d) => PhotoMedia.fromMap(d.data(), d.id)).toList();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final auth = context.watch<AuthProvider>();
+    final permisos = PermisosService(auth);
+
+    final obsRef = _db.collection('observaciones').doc(widget.observacionId);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Revisión de observación')),
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: obsRef.snapshots(),
+        builder: (context, snap) {
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const Center(child: CircularProgressIndicator());
+          }
+          if (!snap.hasData || !snap.data!.exists || snap.data!.data() == null) {
+            return const Center(child: Text('No se encontró la observación.'));
+          }
+
+          final raw = snap.data!.data()!..putIfAbsent('id', () => snap.data!.id);
+          final obs = Observacion.fromMap(raw, snap.data!.id);
+
+          // Permisos
+          final proyectoId = obs.idProyecto;
+          final soyAutor = (obs.uidUsuario == auth.uid);
+          final reviewerEsAdmin = permisos.isAdminUnico;
+          final esModeradorProyecto = (proyectoId != null && proyectoId.isNotEmpty)
+              ? permisos.canModerateProject(proyectoId)
+              : false;
+          final puedeAprobar = reviewerEsAdmin || (esModeradorProyecto && !soyAutor);
+
+          final mediaStream = _fs.streamPhotoMediaForObservacion(widget.observacionId);
+
+          final dtRejected = _ts(raw['rejected_at']);
+          final dtUpdated = _ts(raw['updated_at']);
+          final updatedAfterReject =
+          (dtRejected != null && dtUpdated != null && dtUpdated.isAfter(dtRejected));
+
+          // calcula/actualiza "changed_fields_since_reject" si aplica
+          if (obs.estado == EstadosObs.rechazado) {
+            // fire and forget
+            unawaited(_ensureChangedFieldsSet(obs.id!, raw));
+          }
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 120),
+            children: [
+              // Header
+              _Header(obs: obs),
+              const SizedBox(height: 6),
+              _EstadoPill(estado: obs.estado ?? EstadosObs.borrador),
+              if (updatedAfterReject)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withOpacity(.08),
+                      border: Border.all(color: Colors.blue.shade300),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.info_outline, color: Colors.blue),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text('Actualizada después del rechazo (${_fmtDT(dtRejected)})'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
+              const SizedBox(height: 16),
+              // ===== Evidencias =====
+              _CardSection(
+                title: 'Evidencias',
+                children: [
+                  _SpanChild(
+                    span: (_) => _.clamp(1, 3),
+                    child: StreamBuilder<List<PhotoMedia>>(
+                      stream: mediaStream,
+                      builder: (ctx, msnap) {
+                        if (msnap.connectionState == ConnectionState.waiting) {
+                          return const Center(
+                            child: Padding(padding: EdgeInsets.all(16), child: CircularProgressIndicator(strokeWidth: 2)),
+                          );
+                        }
+                        final medias = (msnap.data ?? const <PhotoMedia>[]);
+                        if (medias.isEmpty) {
+                          return const Text('Sin fotos cargadas.');
+                        }
+                        return GridView.builder(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 2, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 4 / 5,
+                          ),
+                          itemCount: medias.length,
+                          itemBuilder: (_, i) => _MediaCard(
+                            media: medias[i],
+                            ensureUrl: _ensureDownloadUrl,
+                            rejectedAt: dtRejected,
+                            fmtDT: _fmtDT,
+                            humanBytes: _humanBytes,
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+
+              // ===== Checklist (se calcula con una lectura única cuando apruebas) =====
+              _CardSection(
+                title: 'Checklist de revisión',
+                children: [
+                  _SpanChild(
+                    child: FutureBuilder<List<PhotoMedia>>(
+                      future: _fetchMediaOnce(),
+                      builder: (_, ms) {
+                        final medias = ms.data ?? const <PhotoMedia>[];
+                        final issues = _issuesForApproval(raw, medias);
+                        final ok = issues.isEmpty;
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _Check(ok, 'Tiene entre 1 y 4 fotos (actual: ${medias.length})'),
+                            _Check(obs.fechaCaptura != null, 'Fecha/hora de captura'),
+                            _Check((obs.lugarTipo ?? '').trim().isNotEmpty, 'Tipo de lugar'),
+                            _Check(((obs.lugarNombre ?? '').trim().isNotEmpty) || ((obs.municipio ?? '').trim().isNotEmpty),
+                                'Nombre del lugar o municipio'),
+                            _Check((obs.lat != null && obs.lng != null), 'Coordenadas (lat/lng)'),
+                            _Check(
+                              {EstadosAnimal.vivo, EstadosAnimal.muerto, EstadosAnimal.rastro}.contains(obs.condicionAnimal),
+                              'Condición válida',
+                            ),
+                            if (obs.condicionAnimal == EstadosAnimal.rastro)
+                              _Check(
+                                ((obs.rastroTipo ?? '').trim().isNotEmpty) || ((obs.rastroDetalle ?? '').trim().isNotEmpty),
+                                'Rastro: tipo o detalle indicado',
+                              ),
+                            if (!ok) ...[
+                              const SizedBox(height: 8),
+                              Text('Pendientes:', style: Theme.of(context).textTheme.bodySmall),
+                              ...issues.map((e) => Padding(
+                                padding: const EdgeInsets.only(top: 2),
+                                child: Text('• $e', style: const TextStyle(color: Colors.red)),
+                              )),
+                            ],
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+
+              // ===== Autor / Proyecto =====
+              _CardSection(
+                title: 'Autor / Proyecto',
+                children: [
+                  _SpanChild(child: _AutorRow(uid: obs.uidUsuario ?? '')),
+                  _SpanChild(child: _ProyectoRow(proyectoId: obs.idProyecto)),
+                ],
+              ),
+
+              // ===== Especie =====
+              _CardSection(
+                title: 'Especie',
+                children: [
+                  _SpanChild(child: _KVx('Nombre científico', obs.especieNombreCientifico ?? '—',
+                      changed: _isChanged(raw, 'especie_nombre_cientifico'))),
+                  _SpanChild(child: _KVx('Nombre común', obs.especieNombreComun ?? '—',
+                      changed: _isChanged(raw, 'especie_nombre_comun'))),
+                ],
+              ),
+
+              // ===== Taxonomía (auto) =====
+              _CardSection(
+                title: 'Taxonomía (auto)',
+                children: [
+                  _SpanChild(child: _KVx('Clase', (raw['taxo_clase'] ?? '—').toString(),
+                      changed: _isChanged(raw, 'taxo_clase'))),
+                  _SpanChild(child: _KVx('Orden', (raw['taxo_orden'] ?? '—').toString(),
+                      changed: _isChanged(raw, 'taxo_orden'))),
+                  _SpanChild(child: _KVx('Familia', (raw['taxo_familia'] ?? '—').toString(),
+                      changed: _isChanged(raw, 'taxo_familia'))),
+                ],
+              ),
+
+              // ===== Lugar =====
+              _CardSection(
+                title: 'Lugar',
+                children: [
+                  _SpanChild(child: _KVx('Nombre del lugar', obs.lugarNombre ?? '—',
+                      changed: _isChanged(raw, 'lugar_nombre'))),
+                  _SpanChild(child: _KVx('Tipo de lugar', obs.lugarTipo ?? '—',
+                      changed: _isChanged(raw, 'lugar_tipo'))),
+                  _SpanChild(child: _KVx('Municipio', obs.municipio ?? '—',
+                      changed: _isChanged(raw, 'municipio'))),
+                  _SpanChild(child: _KVx('Estado (auto)', obs.estadoPais ?? '—',
+                      changed: _isChanged(raw, 'estado_pais'))),
+                  _SpanChild(child: _KVx('Región (auto)', (raw['ubic_region'] ?? '—').toString(),
+                      changed: _isChanged(raw, 'ubic_region'))),
+                  _SpanChild(child: _KVx('Distrito (auto)', (raw['ubic_distrito'] ?? '—').toString(),
+                      changed: _isChanged(raw, 'ubic_distrito'))),
+                ],
+              ),
+
+              // ===== Coordenadas =====
+              _CardSection(
+                title: 'Coordenadas',
+                children: [
+                  _SpanChild(child: _KVx('Latitud', obs.lat?.toStringAsFixed(6) ?? '—',
+                      changed: _isChanged(raw, 'lat'))),
+                  _SpanChild(child: _KVx('Longitud', obs.lng?.toStringAsFixed(6) ?? '—',
+                      changed: _isChanged(raw, 'lng'))),
+                  _SpanChild(child: _KVx('Altitud',
+                      obs.altitud != null ? '${obs.altitud!.toStringAsFixed(1)} m' : '—',
+                      changed: _isChanged(raw, 'altitud'))),
+                ],
+              ),
+
+              // ===== Captura =====
+              _CardSection(
+                title: 'Captura',
+                children: [
+                  _SpanChild(child: _KVx('Fecha/Hora de captura', _fmtFecha(obs.fechaCaptura),
+                      changed: _isChanged(raw, 'fecha_captura'))),
+                  _SpanChild(child: _KVx('Edad aproximada', obs.edadAproximada?.toString() ?? '—',
+                      changed: _isChanged(raw, 'edad_aproximada'))),
+                  _SpanChild(child: _KVx('Condición', obs.condicionAnimal ?? '—',
+                      changed: _isChanged(raw, 'condicion_animal'))),
+                  if ((obs.condicionAnimal ?? '') == EstadosAnimal.rastro)
+                    _SpanChild(child: _KVx('Tipo de rastro', obs.rastroTipo ?? '—',
+                        changed: _isChanged(raw, 'rastro_tipo'))),
+                  if ((obs.condicionAnimal ?? '') == EstadosAnimal.rastro)
+                    _SpanChild(child: _KVx('Detalle del rastro', obs.rastroDetalle ?? '—',
+                        changed: _isChanged(raw, 'rastro_detalle'))),
+                ],
+              ),
+
+              if ((obs.notas ?? '').trim().isNotEmpty)
+                _CardSection(
+                  title: 'Notas',
+                  children: [ _SpanChild(child: _KVx('Notas', obs.notas!.trim(),
+                      changed: _isChanged(raw, 'notas'))), ],
+                ),
+
+              const SizedBox(height: 12),
+              _ActionsBar(
+                estado: obs.estado ?? EstadosObs.borrador,
+                puedeAprobar: puedeAprobar,
+                soyAutor: soyAutor,
+                working: _working,
+                motivoCtrl: _motivoCtrl,
+                onAprobar: () async {
+                  // Validación dura previo a aprobar
+                  final medias = await _fetchMediaOnce();
+                  final issues = _issuesForApproval(raw, medias);
+                  if (issues.isNotEmpty) {
+                    showDialog(
+                      context: context,
+                      builder: (_) => AlertDialog(
+                        title: const Text('Faltan requisitos'),
+                        content: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: issues.map((e) => Text('• $e')).toList(),
+                        ),
+                        actions: [ TextButton(onPressed: () => Navigator.pop(context), child: const Text('Ok')) ],
+                      ),
+                    );
+                    return;
+                  }
+                  await _confirm(
+                    title: 'Aprobar observación',
+                    message: '¿Confirmas aprobar esta observación?',
+                    run: () => _runAction(
+                      call: () => context.read<ObservacionProvider>().aprobar(obs.id!),
+                      okMsg: 'Observación aprobada',
+                      obsForNotif: obs,
+                      meta: {'estado': EstadosObs.aprobado},
+                    ),
+                  );
+                },
+                onRechazar: () async {
+                  if (_motivoCtrl.text.trim().isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Escribe el motivo de rechazo')),
+                    );
+                    return;
+                  }
+                  await _confirm(
+                    title: 'Rechazar observación',
+                    message: '¿Seguro que deseas rechazarla? Se notificará al autor.',
+                    run: () => _runAction(
+                      call: () => context.read<ObservacionProvider>()
+                          .rechazar(obs.id!, motivo: _motivoCtrl.text.trim()),
+                      okMsg: 'Observación rechazada',
+                      obsForNotif: obs,
+                      meta: {
+                        'estado': EstadosObs.rechazado,
+                        'motivo': _motivoCtrl.text.trim(),
+                      },
+                    ),
+                  );
+                },
+                onArchivar: () => _confirm(
+                  title: 'Archivar observación',
+                  message: 'Se moverá a “Archivado”. ¿Continuar?',
+                  run: () => _runAction(
+                    call: () => context.read<ObservacionProvider>().archivar(obs.id!),
+                    okMsg: 'Observación archivada',
+                    obsForNotif: obs,
+                    meta: {'estado': EstadosObs.archivado},
+                  ),
+                ),
+                onRevertir: () => _confirm(
+                  title: 'Devolver a borrador',
+                  message: 'La observación volverá a “borrador”. ¿Continuar?',
+                  run: () => _runAction(
+                    call: () => context.read<ObservacionProvider>().revertirABorrador(obs.id!),
+                    okMsg: 'Devuelta a borrador',
+                    obsForNotif: obs,
+                    meta: {'estado': EstadosObs.borrador},
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 }
 
-// =======================
-//      SECCIONES UI
-// =======================
+// ================== Helpers UI (igual estilo que “agregar”) ==================
+class _CardSection extends StatelessWidget {
+  final String title;
+  final List<_SpanChild> children;
+  final EdgeInsets margin;
+  const _CardSection({
+    required this.title,
+    required this.children,
+    this.margin = const EdgeInsets.only(bottom: 16),
+  });
+
+  int _colsForWidth(double w) {
+    if (w >= 1200) return 3;
+    if (w >= 801) return 2;
+    return 1;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, constraints) {
+      final cols = _colsForWidth(constraints.maxWidth);
+      const gap = 12.0;
+      final colW = (constraints.maxWidth - gap * (cols - 1)) / cols;
+      final items = <Widget>[];
+      for (final sc in children) {
+        final span = sc.span?.call(cols) ?? 1;
+        final width = (span.clamp(1, cols) * colW) + (gap * (span - 1));
+        items.add(SizedBox(width: width, child: sc.child));
+      }
+      return Card(
+        elevation: 1.5,
+        margin: margin,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Container(
+                  width: 6, height: 22,
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.secondaryContainer,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(title, style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w800,
+                )),
+              ]),
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              Wrap(spacing: 12.0, runSpacing: 12.0, children: items),
+            ],
+          ),
+        ),
+      );
+    });
+  }
+}
+
+class _SpanChild {
+  final Widget child;
+  final int Function(int cols)? span;
+  _SpanChild({required this.child, this.span});
+}
+
+class _KVx extends StatelessWidget {
+  final String k;
+  final String v;
+  final bool changed;
+  const _KVx(this.k, this.v, {this.changed = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      title: Row(
+        children: [
+          Text(k, style: Theme.of(context).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600)),
+          if (changed) ...[
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.blue.withOpacity(.12),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Colors.blue.shade300),
+              ),
+              child: const Text('Actualizado', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+            ),
+          ],
+        ],
+      ),
+      subtitle: Text(v),
+    );
+  }
+}
 
 class _Header extends StatelessWidget {
   final Observacion obs;
@@ -470,266 +717,286 @@ class _Header extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // ❌ Sin IDs en el título: usa lugar/municipio o "Observación"
     final title = (obs.lugarNombre?.trim().isNotEmpty ?? false)
         ? obs.lugarNombre!.trim()
         : (obs.municipio?.trim().isNotEmpty ?? false)
         ? obs.municipio!.trim()
         : 'Observación';
+    String t(int n) => n.toString().padLeft(2, '0');
+    final dt = obs.fechaCaptura;
+    final fecha = (dt == null)
+        ? 'Sin fecha'
+        : '${dt.year}-${t(dt.month)}-${t(dt.day)} ${t(dt.hour)}:${t(dt.minute)}';
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(title, style: Theme.of(context).textTheme.titleLarge),
         const SizedBox(height: 4),
-        Text(_fmtDate(obs.fechaCaptura), style: Theme.of(context).textTheme.bodySmall),
+        Text(fecha, style: Theme.of(context).textTheme.bodySmall),
       ],
     );
   }
+}
 
-  static String _fmtDate(DateTime? dt) {
-    if (dt == null) return 'Sin fecha';
-    final y = dt.year.toString().padLeft(4, '0');
-    final m = dt.month.toString().padLeft(2, '0');
-    final d = dt.day.toString().padLeft(2, '0');
-    final h = dt.hour.toString().padLeft(2, '0');
-    final min = dt.minute.toString().padLeft(2, '0');
-    return '$y-$m-$d $h:$min';
+class _EstadoPill extends StatelessWidget {
+  final String estado;
+  const _EstadoPill({required this.estado});
+
+  @override
+  Widget build(BuildContext context) {
+    Color bg, fg;
+    switch (estado) {
+      case EstadosObs.aprobado: bg = Colors.green.shade100; fg = Colors.green.shade800; break;
+      case EstadosObs.rechazado: bg = Colors.red.shade100; fg = Colors.red.shade800; break;
+      case EstadosObs.pendiente:
+      case EstadosObs.revisarNuevo: bg = Colors.amber.shade100; fg = Colors.amber.shade900; break;
+      case EstadosObs.archivado: bg = Colors.blueGrey.shade100; fg = Colors.blueGrey.shade800; break;
+      default: bg = Colors.grey.shade200; fg = Colors.grey.shade800;
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(999)),
+        child: Text(estado, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg)),
+      ),
+    );
   }
 }
 
-String _shortId(String id) => id.length <= 6 ? id : id.substring(0, 6);
+class _MediaCard extends StatefulWidget {
+  final PhotoMedia media;
+  final Future<String> Function(String) ensureUrl;
+  final DateTime? rejectedAt;
+  final String Function(dynamic) fmtDT;
+  final String Function(dynamic) humanBytes;
 
-class _FotosSection extends StatefulWidget {
-  final List<String> mediaUrls;
-  final Future<String> Function(String) ensureUrl; // <- inyección del resolver
-  const _FotosSection({required this.mediaUrls, required this.ensureUrl});
+  const _MediaCard({
+    required this.media,
+    required this.ensureUrl,
+    required this.rejectedAt,
+    required this.fmtDT,
+    required this.humanBytes,
+  });
 
   @override
-  State<_FotosSection> createState() => _FotosSectionState();
+  State<_MediaCard> createState() => _MediaCardState();
 }
 
-class _FotosSectionState extends State<_FotosSection> {
-  late Future<List<String>> _fut;
+class _MediaCardState extends State<_MediaCard> {
+  late Future<String> _fut;
 
   @override
   void initState() {
     super.initState();
-    _fut = _resolveAll(widget.mediaUrls);
+    _fut = _resolve();
   }
 
   @override
-  void didUpdateWidget(covariant _FotosSection oldWidget) {
+  void didUpdateWidget(covariant _MediaCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.mediaUrls != widget.mediaUrls) {
-      _fut = _resolveAll(widget.mediaUrls);
+    if (oldWidget.media.id != widget.media.id ||
+        oldWidget.media.thumbnailPath != widget.media.thumbnailPath ||
+        oldWidget.media.storagePath != widget.media.storagePath) {
+      _fut = _resolve();
     }
   }
 
-  Future<List<String>> _resolveAll(List<String> raws) async {
-    final list = <String>[];
-    for (final r in raws) {
-      try {
-        final url = await widget.ensureUrl(r);
-        if (url.isNotEmpty) list.add(url);
-      } catch (_) {
-        // Ignora la que falle y continúa
-      }
-    }
-    return list;
-  }
-
-  void _openViewer(List<String> urls, int index) {
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        insetPadding: const EdgeInsets.all(12),
-        clipBehavior: Clip.antiAlias,
-        child: Stack(
-          children: [
-            PageView.builder(
-              controller: PageController(initialPage: index),
-              itemCount: urls.length,
-              itemBuilder: (_, i) => InteractiveViewer(
-                panEnabled: true,
-                minScale: 0.8,
-                maxScale: 4,
-                child: CachedNetworkImage(
-                  imageUrl: urls[i],
-                  fit: BoxFit.contain,
-                  progressIndicatorBuilder: (_, __, p) => const Center(
-                    child: Padding(
-                      padding: EdgeInsets.all(24),
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  ),
-                  errorWidget: (_, src, ___) {
-                    debugPrint('⚠️ Error cargando imagen: $src');
-                    return const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(24),
-                        child: Icon(Icons.broken_image_outlined, size: 48),
-                      ),
-                    );
-                  },
-                ),
-              ),
-            ),
-            Positioned(
-              top: 8, right: 8,
-              child: IconButton(
-                onPressed: () => Navigator.pop(ctx),
-                icon: const Icon(Icons.close),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
+  Future<String> _resolve() async {
+    final thumb = widget.media.thumbnailPath ?? '';
+    final src = thumb.isNotEmpty ? thumb : (widget.media.url ?? widget.media.storagePath);
+    return await widget.ensureUrl(src ?? '');
   }
 
   @override
   Widget build(BuildContext context) {
-    if (widget.mediaUrls.isEmpty) {
-      return const _Card(
-        child: Padding(
-          padding: EdgeInsets.all(12),
-          child: Row(
-            children: [
-              Icon(Icons.image_not_supported_outlined),
-              SizedBox(width: 8),
-              Expanded(child: Text('Sin fotos cargadas (o aún procesándose).')),
-            ],
-          ),
-        ),
-      );
+    final badges = <Widget>[];
+    if ((widget.media.authenticity ?? '').isNotEmpty) {
+      badges.add(_smallBadge(widget.media.authenticity!));
+    }
+    if ((widget.media.quality ?? '').isNotEmpty) {
+      badges.add(_smallBadge(widget.media.quality!));
+    }
+    if ((widget.media.flags ?? const <String>[]).isNotEmpty) {
+      for (final f in widget.media.flags!) {
+        badges.add(_smallBadge(f));
+      }
     }
 
-    return FutureBuilder<List<String>>(
+    final j = widget.media.toMap();
+    final capturedAt = j['captured_at'];
+    final createdAt  = j['createdAt'];
+    final camera     = (j['camera_model'] ?? j['device_model'] ?? '').toString();
+    final orig       = (j['original_file_name'] ?? '').toString();
+    final size       = j['file_size'];
+    final width      = j['width'] ?? j['image_width'];
+    final height     = j['height'] ?? j['image_height'];
+    final nuevo      = (widget.rejectedAt != null &&
+        createdAt != null &&
+        (createdAt is Timestamp ? createdAt.toDate() : DateTime.tryParse(createdAt.toString()) ?? DateTime(1900))
+            .isAfter(widget.rejectedAt!));
+
+    return FutureBuilder<String>(
       future: _fut,
       builder: (ctx, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return SizedBox(
-            height: 160,
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: 3,
-              separatorBuilder: (_, __) => const SizedBox(width: 10),
-              itemBuilder: (_, __) => const _Card(
-                child: SizedBox(
-                  width: 220,
-                  child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
-                ),
-              ),
-            ),
-          );
-        }
-
-        final urls = (snap.data ?? const <String>[]);
-        if (urls.isEmpty) {
-          return const _Card(
-            child: Padding(
-              padding: EdgeInsets.all(12),
-              child: Row(
-                children: [
-                  Icon(Icons.image_not_supported_outlined),
-                  SizedBox(width: 8),
-                  Expanded(child: Text('Sin fotos cargadas (o aún procesándose).')),
-                ],
-              ),
-            ),
-          );
-        }
-
-        return SizedBox(
-          height: 160,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: urls.length,
-            separatorBuilder: (_, __) => const SizedBox(width: 10),
-            itemBuilder: (ctx, i) {
-              final url = urls[i];
-              return InkWell(
-                onTap: () => _openViewer(urls, i),
-                child: _Card(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: AspectRatio(
-                      aspectRatio: 4 / 3,
-                      child: CachedNetworkImage(
-                        imageUrl: url,
-                        fit: BoxFit.cover,
-                        progressIndicatorBuilder: (_, __, p) =>
-                        const Center(child: CircularProgressIndicator(strokeWidth: 2)),
-                        errorWidget: (_, src, ___) {
-                          debugPrint('⚠️ Error cargando imagen: $src');
-                          return Container(
-                            color: Colors.black12,
-                            alignment: Alignment.center,
-                            child: const Icon(Icons.broken_image_outlined),
-                          );
-                        },
+        final url = snap.data ?? '';
+        return Card(
+          clipBehavior: Clip.antiAlias,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: Column(
+            children: [
+              Expanded(
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: (url.isEmpty)
+                          ? Container(color: Colors.black12, alignment: Alignment.center,
+                          child: const Icon(Icons.image_not_supported_outlined))
+                          : CachedNetworkImage(
+                        imageUrl: url, fit: BoxFit.cover,
+                        errorWidget: (_, __, ___) => const Icon(Icons.broken_image_outlined),
                       ),
                     ),
-                  ),
+                    if (badges.isNotEmpty)
+                      Positioned(
+                        left: 6, top: 6, right: 6,
+                        child: Wrap(spacing: 6, runSpacing: 6, children: badges.take(3).toList()),
+                      ),
+                    if (nuevo)
+                      Positioned(
+                        right: 6, top: 6,
+                        child: _smallBadge('NUEVO', strong: true, color: Colors.orange.withOpacity(.85)),
+                      ),
+                  ],
                 ),
-              );
-            },
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (capturedAt != null) Text('Tomada: ${widget.fmtDT(capturedAt)}', style: const TextStyle(fontSize: 12)),
+                    if (camera.isNotEmpty)   Text('Cámara: $camera', style: const TextStyle(fontSize: 12)),
+                    Row(
+                      children: [
+                        if (width != null && height != null)
+                          Expanded(child: Text('Dimensiones: ${width}×$height', style: const TextStyle(fontSize: 12))),
+                        if (size != null)
+                          Expanded(child: Text('Tamaño: ${widget.humanBytes(size)}', style: const TextStyle(fontSize: 12))),
+                      ],
+                    ),
+                    if (orig.isNotEmpty) Text('Archivo: $orig', style: const TextStyle(fontSize: 12)),
+                  ],
+                ),
+              ),
+            ],
           ),
         );
       },
     );
   }
+
+  Widget _smallBadge(String text, {bool strong = false, Color? color}) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+    decoration: BoxDecoration(
+      color: (color ?? Colors.black.withOpacity(.55)),
+      borderRadius: BorderRadius.circular(8),
+    ),
+    child: Text(text,
+        style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: strong ? FontWeight.w800 : FontWeight.w600)),
+  );
 }
 
-class _CoordsCard extends StatelessWidget {
-  final double? lat, lng, altitud;
-  const _CoordsCard({this.lat, this.lng, this.altitud});
+class _Check extends StatelessWidget {
+  final bool ok;
+  final String text;
+  const _Check(this.ok, this.text);
 
   @override
   Widget build(BuildContext context) {
-    final hasLat = lat != null && lat!.isFinite;
-    final hasLng = lng != null && lng!.isFinite;
-    final hasAlt = altitud != null && altitud!.isFinite;
-
-    final coords = [
-      if (hasLat && hasLng) '${lat!.toStringAsFixed(6)}, ${lng!.toStringAsFixed(6)}',
-      if (hasAlt) '${altitud!.toStringAsFixed(1)} m',
-    ].join(' · ');
-
-    return _Card(
-      child: ListTile(
-        leading: const Icon(Icons.place_outlined),
-        title: const Text('Coordenadas'),
-        subtitle: Text(coords.isEmpty ? '—' : coords),
-      ),
+    return Row(
+      children: [
+        Icon(ok ? Icons.check_circle : Icons.error_outline,
+            size: 16, color: ok ? Colors.green : Colors.red),
+        const SizedBox(width: 6),
+        Expanded(child: Text(text)),
+      ],
     );
   }
 }
 
-class _ConditionBlock extends StatelessWidget {
-  final String? condicion;
-  final String? rastroTipo;
-  final String? rastroDetalle;
-  const _ConditionBlock({
-    required this.condicion,
-    required this.rastroTipo,
-    required this.rastroDetalle,
-  });
+// Autor y Proyecto (lookups compactos)
+class _AutorRow extends StatelessWidget {
+  final String uid;
+  const _AutorRow({required this.uid});
 
   @override
   Widget build(BuildContext context) {
-    final rows = <Widget>[];
-    rows.add(_KV('Condición', condicion ?? '—'));
-    if ((rastroTipo ?? '').trim().isNotEmpty) {
-      rows.add(_KV('Tipo de rastro', rastroTipo!.trim()));
-    }
-    if ((rastroDetalle ?? '').trim().isNotEmpty) {
-      rows.add(_KV('Detalle del rastro', rastroDetalle!.trim()));
-    }
-    return Column(children: rows);
+    if ((uid).trim().isEmpty) return const _KVx('Autor', '—');
+    final fut = FirebaseFirestore.instance.collection('usuarios').doc(uid).get();
+    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      future: fut,
+      builder: (ctx, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: Text('Autor', style: TextStyle(fontSize: 12)),
+            subtitle: SizedBox(height: 14, child: LinearProgressIndicator()),
+          );
+        }
+        String valor = '—';
+        if (snap.hasData && snap.data!.data() != null) {
+          final data = snap.data!.data()!;
+          final n = (data['nombre_completo'] ?? data['displayName'] ?? data['nombre'] ?? '').toString().trim();
+          final c = (data['correo'] ?? data['email'] ?? '').toString().trim();
+          if (n.isNotEmpty) {
+            valor = c.isNotEmpty ? '$n · $c' : n;
+          } else if (c.isNotEmpty) {
+            valor = c;
+          }
+        }
+        return _KVx('Autor', valor);
+      },
+    );
   }
 }
 
+class _ProyectoRow extends StatelessWidget {
+  final String? proyectoId;
+  const _ProyectoRow({required this.proyectoId});
+
+  @override
+  Widget build(BuildContext context) {
+    if (proyectoId == null || proyectoId!.trim().isEmpty) {
+      return const _KVx('Proyecto', '— (sin proyecto)');
+    }
+    final fut = FirebaseFirestore.instance.collection('proyectos').doc(proyectoId).get();
+    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      future: fut,
+      builder: (ctx, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: Text('Proyecto', style: TextStyle(fontSize: 12)),
+            subtitle: SizedBox(height: 14, child: LinearProgressIndicator()),
+          );
+        }
+        String valor = '—';
+        if (snap.hasData && snap.data!.data() != null) {
+          final data = snap.data!.data()!;
+          final nombre = (data['nombre'] ?? data['titulo'] ?? '').toString().trim();
+          if (nombre.isNotEmpty) valor = nombre;
+        }
+        return _KVx('Proyecto', valor);
+      },
+    );
+  }
+}
+
+// Barra de acciones compacta
 class _ActionsBar extends StatelessWidget {
   final String estado;
   final bool puedeAprobar;
@@ -741,7 +1008,6 @@ class _ActionsBar extends StatelessWidget {
   final VoidCallback onRechazar;
   final VoidCallback onArchivar;
   final VoidCallback onRevertir;
-  final VoidCallback onEnviarRevision;
 
   const _ActionsBar({
     required this.estado,
@@ -753,17 +1019,16 @@ class _ActionsBar extends StatelessWidget {
     required this.onRechazar,
     required this.onArchivar,
     required this.onRevertir,
-    required this.onEnviarRevision,
   });
 
   @override
   Widget build(BuildContext context) {
-    final canModerate = puedeAprobar && estado == EstadosObs.pendiente;
+    final isPendiente = estado == EstadosObs.pendiente || estado == EstadosObs.revisarNuevo;
+    final canModerate = puedeAprobar && isPendiente;
     final showArchivar = estado == EstadosObs.aprobado && puedeAprobar;
     final showRevertir =
-        (estado == EstadosObs.rechazado || estado == EstadosObs.archivado) &&
-            (puedeAprobar || soyAutor);
-    final showEnviarAutor = estado == EstadosObs.borrador && soyAutor;
+        (estado == EstadosObs.rechazado && (puedeAprobar || soyAutor)) ||
+            (estado == EstadosObs.archivado && puedeAprobar);
 
     return Material(
       elevation: 12,
@@ -778,8 +1043,7 @@ class _ActionsBar extends StatelessWidget {
               if (canModerate) ...[
                 Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Motivo de rechazo (si aplica)',
-                      style: Theme.of(context).textTheme.bodySmall),
+                  child: Text('Motivo de rechazo (si aplica)', style: Theme.of(context).textTheme.bodySmall),
                 ),
                 const SizedBox(height: 6),
                 TextField(
@@ -822,12 +1086,6 @@ class _ActionsBar extends StatelessWidget {
                       icon: const Icon(Icons.undo),
                       label: const Text('Revertir a borrador'),
                     ),
-                  if (showEnviarAutor)
-                    FilledButton.icon(
-                      onPressed: working ? null : onEnviarRevision,
-                      icon: const Icon(Icons.outgoing_mail),
-                      label: const Text('Enviar a revisión'),
-                    ),
                 ],
               ),
             ],
@@ -838,189 +1096,3 @@ class _ActionsBar extends StatelessWidget {
   }
 }
 
-// =======================
-//   WIDGETS/UTILIDADES
-// =======================
-
-class _SectionTitle extends StatelessWidget {
-  final String text;
-  const _SectionTitle(this.text);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Text(text, style: Theme.of(context).textTheme.titleMedium),
-    );
-  }
-}
-
-class _KV extends StatelessWidget {
-  final String k;
-  final String v;
-  const _KV(this.k, this.v);
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      dense: true,
-      contentPadding: EdgeInsets.zero,
-      title: Text(k, style: Theme.of(context).textTheme.bodySmall),
-      subtitle: Text(v),
-    );
-  }
-}
-
-class _EstadoPill extends StatelessWidget {
-  final String estado;
-  const _EstadoPill({required this.estado});
-
-  @override
-  Widget build(BuildContext context) {
-    Color bg;
-    Color fg;
-    switch (estado) {
-      case EstadosObs.aprobado:
-        bg = Colors.green.shade100;
-        fg = Colors.green.shade800;
-        break;
-      case EstadosObs.rechazado:
-        bg = Colors.red.shade100;
-        fg = Colors.red.shade800;
-        break;
-      case EstadosObs.pendiente:
-        bg = Colors.amber.shade100;
-        fg = Colors.amber.shade900;
-        break;
-      case EstadosObs.archivado:
-        bg = Colors.blueGrey.shade100;
-        fg = Colors.blueGrey.shade800;
-        break;
-      default:
-        bg = Colors.grey.shade200;
-        fg = Colors.grey.shade800;
-    }
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration:
-        BoxDecoration(color: bg, borderRadius: BorderRadius.circular(999)),
-        child: Text(
-          estado,
-          style:
-          TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: fg),
-        ),
-      ),
-    );
-  }
-}
-
-class _Card extends StatelessWidget {
-  final Widget child;
-  const _Card({required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).dividerColor),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: child,
-    );
-  }
-}
-
-Widget _chip(IconData icon, String text) {
-  return Container(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-    decoration: BoxDecoration(
-      color: Colors.black.withOpacity(.05),
-      borderRadius: BorderRadius.circular(8),
-    ),
-    child: Row(mainAxisSize: MainAxisSize.min, children: [
-      Icon(icon, size: 14, color: Colors.black54),
-      const SizedBox(width: 4),
-      Text(text, style: const TextStyle(fontSize: 11, color: Colors.black87)),
-    ]),
-  );
-}
-
-/// ---------- Filas con nombres reales ----------
-
-class _AutorRow extends StatelessWidget {
-  final String uid;
-  const _AutorRow({required this.uid});
-
-  @override
-  Widget build(BuildContext context) {
-    final fut =
-    FirebaseFirestore.instance.collection('usuarios').doc(uid).get();
-    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      future: fut,
-      builder: (ctx, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: Text('Autor', style: TextStyle(fontSize: 12)),
-            subtitle: SizedBox(height: 14, child: LinearProgressIndicator()),
-          );
-        }
-        String valor = '—';
-        if (snap.hasData && snap.data!.data() != null) {
-          final data = snap.data!.data()!;
-          final nombre =
-          (data['displayName'] ?? data['nombre'] ?? '').toString().trim();
-          final correo = (data['email'] ?? '').toString().trim();
-          if (nombre.isNotEmpty) {
-            valor = correo.isNotEmpty ? '$nombre · $correo' : nombre;
-          } else if (correo.isNotEmpty) {
-            valor = correo;
-          }
-        }
-        return _KV('Autor', valor);
-      },
-    );
-  }
-}
-
-class _ProyectoRow extends StatelessWidget {
-  final String? proyectoId;
-  const _ProyectoRow({required this.proyectoId});
-
-  @override
-  Widget build(BuildContext context) {
-    if (proyectoId == null || proyectoId!.trim().isEmpty) {
-      return const _KV('Proyecto', '— (sin proyecto)');
-    }
-    final fut = FirebaseFirestore.instance
-        .collection('proyectos')
-        .doc(proyectoId)
-        .get();
-    return FutureBuilder<DocumentSnapshot<Map<String, dynamic>>>(
-      future: fut,
-      builder: (ctx, snap) {
-        if (snap.connectionState == ConnectionState.waiting) {
-          return const ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: Text('Proyecto', style: TextStyle(fontSize: 12)),
-            subtitle: SizedBox(height: 14, child: LinearProgressIndicator()),
-          );
-        }
-        String valor = '—';
-        if (snap.hasData && snap.data!.data() != null) {
-          final data = snap.data!.data()!;
-          final nombre =
-          (data['nombre'] ?? data['titulo'] ?? '').toString().trim();
-          if (nombre.isNotEmpty) valor = nombre;
-        }
-        return _KV('Proyecto', valor);
-      },
-    );
-  }
-}
